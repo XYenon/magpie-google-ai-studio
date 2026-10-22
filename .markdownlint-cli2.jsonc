@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/markdownlint-cli2/schema/markdownlint-cli2-config-schema.json",
+  "config": {
+    // Keep Chinese paragraphs and wide configuration tables on a single line.
+    "MD013": false
+  },
+  "globs": ["**/*.{md,markdown}"],
+  "gitignore": true,
+  "ignores": ["node_modules/**"]
+}

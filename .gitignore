@@ -1,0 +1,7 @@
+node_modules/
+.amp/
+*.tsbuildinfo
+.env
+*.session.json
+*.aistudio.json
+storage-state*.json
