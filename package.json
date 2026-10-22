@@ -1,0 +1,64 @@
+{
+  "name": "magpie-google-ai-studio",
+  "version": "0.1.0",
+  "description": "Google AI Studio provider for Magpie, powered by Bun.WebView",
+  "author": {
+    "name": "XYenon",
+    "url": "https://github.com/XYenon"
+  },
+  "homepage": "https://github.com/XYenon/magpie-google-ai-studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/XYenon/magpie-google-ai-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/XYenon/magpie-google-ai-studio/issues"
+  },
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./server": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "check": "bun run lint && bun run typecheck && bun test",
+    "lint": "biome check --error-on-warnings . && prettier --check \"**/*.{md,markdown,yml,yaml}\" --ignore-path .gitignore && bun run lint:markdown",
+    "lint:markdown": "markdownlint-cli2",
+    "lint:fix": "biome check --write --error-on-warnings . && markdownlint-cli2 --fix && prettier --write \"**/*.{md,markdown,yml,yaml}\" --ignore-path .gitignore",
+    "format": "biome format --write . && prettier --write \"**/*.{md,markdown,yml,yaml}\" --ignore-path .gitignore",
+    "test": "bun test",
+    "typecheck": "bun check",
+    "login": "bun src/login.ts",
+    "session": "bun src/session-cli.ts",
+    "smoke": "bun src/smoke.ts"
+  },
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "opencode",
+    "opencode-plugin",
+    "google-ai-studio",
+    "gemini",
+    "bun"
+  ],
+  "license": "AGPL-3.0-or-later",
+  "publishConfig": {
+    "access": "public"
+  },
+  "magpie": {
+    "maxConcurrency": 1
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.2",
+    "@types/bun": "^1.4.0",
+    "markdownlint-cli2": "^0.24.0",
+    "prettier": "^3.9.10"
+  }
+}
