@@ -455,6 +455,32 @@ const thresholds = {
   OFF: 5,
 };
 
+/** Checks shared by the Playground encoder and the native Build proxy. */
+export function validateGenerateRequest(request: ObjectValue): void {
+  const config = object(request.generationConfig ?? {}, "generationConfig");
+  if (config.temperature != null) {
+    const temperature = number(config.temperature, "temperature");
+    if (temperature < 0 || temperature > 2) fail("temperature must be between 0 and 2");
+  }
+  if (config.thinkingConfig !== undefined) {
+    const thinking = object(config.thinkingConfig, "thinkingConfig");
+    if (thinking.thinkingBudget !== undefined && thinking.thinkingLevel !== undefined)
+      fail("thinkingBudget and thinkingLevel are mutually exclusive");
+  }
+  if (request.toolConfig !== undefined) {
+    const tool = object(request.toolConfig, "toolConfig");
+    if (tool.functionCallingConfig !== undefined) {
+      const calling = object(tool.functionCallingConfig, "functionCallingConfig");
+      if (
+        calling.allowedFunctionNames !== undefined &&
+        strings(calling.allowedFunctionNames, "allowedFunctionNames").length > 0 &&
+        calling.mode !== "ANY"
+      )
+        fail("allowedFunctionNames requires mode ANY");
+    }
+  }
+}
+
 /** defaults is the original ListModels row. The browser supplies a fresh WAA slot. */
 export function encodeGenerateRequest(
   model: string,
@@ -469,6 +495,7 @@ export function encodeGenerateRequest(
     ["contents", "systemInstruction", "tools", "toolConfig", "generationConfig", "safetySettings"],
     "request",
   );
+  validateGenerateRequest(request);
   if (!/^(models\/)?[\w.-]+$/.test(model)) fail("invalid model ID");
   const contents = array(request.contents, "contents").map((c) => encodeContent(c));
   if (!contents.length) fail("contents cannot be empty");
@@ -552,13 +579,15 @@ export function encodeGenerateRequest(
   if (config.thinkingConfig !== undefined || caps.some((c) => c === 25 || c === 35 || c === 52)) {
     const t = object(config.thinkingConfig ?? {});
     keys(t, ["thinkingBudget", "thinkingLevel", "includeThoughts"], "thinkingConfig");
-    if (t.thinkingBudget !== undefined && t.thinkingLevel !== undefined)
-      fail("thinkingBudget and thinkingLevel are mutually exclusive");
     const thinking: Wire = [t.includeThoughts === undefined ? 1 : boolean(t.includeThoughts) ? 1 : 0];
     if (t.thinkingBudget !== undefined)
       set(thinking, 1, number(t.thinkingBudget, "thinkingBudget", -1, Infinity, true));
     if (t.thinkingLevel !== undefined)
-      set(thinking, 3, enumCode(t.thinkingLevel, thinkingLevels, "thinkingLevel"));
+      set(
+        thinking,
+        3,
+        enumCode(string(t.thinkingLevel, "thinkingLevel").toUpperCase(), thinkingLevels, "thinkingLevel"),
+      );
     else if (caps.includes(52))
       set(thinking, 3, defaults[71] == null ? 2 : json(array(defaults[71])[5] ?? 2));
     set(wire, 16, thinking);

@@ -116,6 +116,137 @@ test("Gemini fetch returns SSE chunks and aggregates the same unary response", a
   expect(body.usageMetadata.promptTokenCount).toBe(17);
 });
 
+test("Magpie thinking levels work for Playground and Build requests", async () => {
+  for (const [level, native, code] of [
+    ["low", "LOW", 1],
+    ["medium", "MEDIUM", 2],
+    ["high", "HIGH", 3],
+    ["minimal", "MINIMAL", 4],
+    ["LOW", "LOW", 1],
+  ] as const) {
+    for (const build of [false, true]) {
+      const fetch = providerFetch({
+        ...transport,
+        async call() {
+          throw new Error("unused");
+        },
+        async generate(_model, _request, encode) {
+          const encoded = encode(undefined, "UTC");
+          if (!build) {
+            expect((encoded.body[3] as Wire)[16]).toEqual([1, null, null, code]);
+            return new Response(root);
+          }
+          const sent = JSON.parse(String(encoded.body[1]));
+          expect(sent.generationConfig.thinkingConfig).toEqual({
+            thinkingLevel: native,
+            includeThoughts: true,
+          });
+          expect(sent.generationConfig.maxOutputTokens).toBe(16384);
+          const reply = { candidates: [{ finishReason: "STOP" }] };
+          return new Response(JSON.stringify([[[JSON.stringify(reply)]]]));
+        },
+      });
+      const response = await fetch(`${base}streamGenerateContent`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...request,
+          generationConfig: {
+            maxOutputTokens: 16384,
+            thinkingConfig: { thinkingLevel: level, includeThoughts: true },
+          },
+          ...(build ? { tools: [{ googleSearch: {} }] } : {}),
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('"finishReason":"STOP"');
+    }
+  }
+});
+
+test("Playground and Build reject invalid generation settings before contacting Google", async () => {
+  const fetch = providerFetch({
+    ...transport,
+    async call() {
+      throw new Error("Invalid input must not reach Google");
+    },
+    async generate() {
+      throw new Error("Invalid input must not reach Google");
+    },
+  });
+  for (const tools of [undefined, [{ googleSearch: {} }]]) {
+    for (const [generationConfig, message] of [
+      [{ temperature: -0.01 }, "temperature"],
+      [{ temperature: 2.01 }, "temperature"],
+      [{ temperature: "2" }, "temperature"],
+      [{ thinkingConfig: { thinkingBudget: 0, thinkingLevel: "low" } }, "mutually exclusive"],
+    ] as const) {
+      for (const method of ["generateContent", "streamGenerateContent"]) {
+        const response = await fetch(`${base}${method}`, {
+          method: "POST",
+          body: JSON.stringify({ ...request, generationConfig, tools }),
+        });
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toMatchObject({
+          status: "INVALID_ARGUMENT",
+          message: expect.stringContaining(message),
+        });
+      }
+    }
+  }
+  for (const mode of [undefined, "AUTO", "NONE"]) {
+    const response = await fetch(`${base}generateContent`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...request,
+        toolConfig: { functionCallingConfig: { mode, allowedFunctionNames: ["choose"] } },
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toContain("allowedFunctionNames requires mode ANY");
+  }
+});
+
+test("both routes preserve temperature boundaries and automatic or zero thinking budgets", async () => {
+  for (const build of [false, true]) {
+    for (const [temperature, thinkingBudget] of [
+      [0, 0],
+      [2, -1],
+    ]) {
+      const generationConfig = { temperature, thinkingConfig: { thinkingBudget } };
+      const fetch = providerFetch({
+        ...transport,
+        async call() {
+          throw new Error("unused");
+        },
+        async generate(_model, _request, encode) {
+          const encoded = encode(undefined, "UTC");
+          if (!build) {
+            expect((encoded.body[3] as Wire)[4]).toBe(temperature);
+            expect(((encoded.body[3] as Wire)[16] as Wire)[1]).toBe(thinkingBudget);
+            return new Response(root);
+          }
+          const sent = JSON.parse(String(encoded.body[1]));
+          expect(sent.generationConfig).toEqual(generationConfig);
+          expect(sent.toolConfig.functionCallingConfig).toEqual({ mode: "AUTO", allowedFunctionNames: [] });
+          return new Response(JSON.stringify([JSON.stringify({ candidates: [{ finishReason: "STOP" }] })]));
+        },
+      });
+      const response = await fetch(`${base}generateContent`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...request,
+          generationConfig,
+          ...(build
+            ? { toolConfig: { functionCallingConfig: { mode: "AUTO", allowedFunctionNames: [] } } }
+            : {}),
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).candidates[0].finishReason).toBe("STOP");
+    }
+  }
+});
+
 test("Gemini fetch rejects unsupported input locally and retains upstream HTTP errors", async () => {
   const fetch = providerFetch(transport);
   expect((await fetch(`${base}generateContent`)).status).toBe(405);

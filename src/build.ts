@@ -1,4 +1,10 @@
-import { decodeRPCStream, type EncodedRequest, errorBody, parseSparseJSON } from "./protocol.ts";
+import {
+  decodeRPCStream,
+  type EncodedRequest,
+  errorBody,
+  parseSparseJSON,
+  validateGenerateRequest,
+} from "./protocol.ts";
 
 export function needsBuild(request: Record<string, unknown>): boolean {
   const config = request.generationConfig as Record<string, unknown> | undefined;
@@ -48,6 +54,7 @@ export function encodeBuildGenerate(
   if (!/^[\w.-]+$/.test(model)) throw new Error("Invalid model ID");
   if (!Array.isArray(request.contents) || !request.contents.length)
     throw new Error("contents must be a nonempty array");
+  validateGenerateRequest(request);
   const body = structuredClone(request);
   const calling = (body.toolConfig as { functionCallingConfig?: { mode?: string } } | undefined)
     ?.functionCallingConfig;
@@ -67,6 +74,10 @@ export function encodeBuildGenerate(
     else delete body.toolConfig;
   }
   const config = body.generationConfig as Record<string, unknown> | undefined;
+  const thinking = config?.thinkingConfig as Record<string, unknown> | undefined;
+  // Magpie sends lowercase levels; the proxy expects Gemini enum names.
+  if (typeof thinking?.thinkingLevel === "string")
+    thinking.thinkingLevel = thinking.thinkingLevel.toUpperCase();
   if (config?.responseJsonSchema !== undefined) {
     if (config.responseSchema !== undefined || config.responseFormat !== undefined)
       throw new Error("Response schema formats are mutually exclusive");
