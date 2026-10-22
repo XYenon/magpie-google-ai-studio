@@ -1,4 +1,4 @@
-import { decodeRPCStream, type EncodedRequest, parseSparseJSON } from "./protocol.ts";
+import { decodeRPCStream, type EncodedRequest, errorBody, parseSparseJSON } from "./protocol.ts";
 
 export function needsBuild(request: Record<string, unknown>): boolean {
   const config = request.generationConfig as Record<string, unknown> | undefined;
@@ -93,6 +93,7 @@ export function decodeBuildMessage(value: unknown): Record<string, unknown> {
   const data = JSON.parse(text);
   if (!data || typeof data !== "object" || Array.isArray(data))
     throw new Error("Invalid Build JSON response");
+  if (data.error) throw new Error(`AI Studio Build: ${errorBody(text)}`);
   return data;
 }
 

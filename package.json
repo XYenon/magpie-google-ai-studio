@@ -1,6 +1,6 @@
 {
   "name": "magpie-google-ai-studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Google AI Studio provider for Magpie, powered by Bun.WebView",
   "author": {
     "name": "XYenon",

@@ -95,6 +95,42 @@ export function parseSparseJSON(text: string): Json {
   return json(JSON.parse(output) as unknown);
 }
 
+const ERROR_BODY_LIMIT = 8 * 1024;
+
+/** Keep the raw UTF-8 body prefix without interpreting private error fields. */
+export function errorBody(value: string | Uint8Array): string {
+  const bytes = typeof value === "string" ? Buffer.from(value) : value;
+  const truncated = bytes.byteLength > ERROR_BODY_LIMIT;
+  const text = new TextDecoder().decode(bytes.subarray(0, ERROR_BODY_LIMIT), { stream: truncated });
+  return truncated ? `${text}\n[truncated]` : text;
+}
+
+/** Read only enough bytes to retain the body prefix and detect truncation. */
+export async function responseError(response: Response): Promise<string> {
+  const fallback = `Google AI Studio returned HTTP ${response.status}`;
+  const reader = response.body?.getReader();
+  if (!reader) return fallback;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const chunk = value.subarray(0, ERROR_BODY_LIMIT + 1 - size);
+      chunks.push(chunk);
+      size += chunk.byteLength;
+      if (size > ERROR_BODY_LIMIT) break;
+    }
+  } catch {
+    // Preserve any body bytes received before the connection failed.
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  const body = errorBody(Buffer.concat(chunks));
+  return body ? `${fallback}: ${body}` : fallback;
+}
+
 function encodeStruct(value: unknown): Wire {
   const entries = Object.entries(object(value, "function args/response")).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
@@ -996,12 +1032,12 @@ export async function* decodeRPCStream(source: ReadableStream<Uint8Array>): Asyn
     }
     if (state === "error") {
       const root = array(parseSparseJSON(prefix), "GenerateContent error");
-      if (root[1] != null) fail("upstream returned a private RPC error");
+      if (root[1] != null) fail(`upstream returned a private RPC error: ${errorBody(prefix)}`);
       fail("GenerateContent root[0] must be a repeated frame array");
     }
     if (state !== "tail") fail("truncated GenerateContent stream");
     const root = array(parseSparseJSON(`[[]${tail}`), "GenerateContent root");
-    if (root[1] != null) fail("upstream returned a private RPC error");
+    if (root[1] != null) fail(`upstream returned a private RPC error: ${errorBody(`[[]${tail}`)}`);
   } finally {
     if (!ended) {
       try {
@@ -1078,8 +1114,7 @@ export async function* decodeGenerateStream(
     previous = usage;
     const response = await continuation!.resume(token, round + 1);
     if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      fail(`continuation returned HTTP ${response.status}`);
+      fail(`continuation failed: ${await responseError(response)}`);
     }
     source = response.body;
   }

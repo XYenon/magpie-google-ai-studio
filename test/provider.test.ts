@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import plugin from "../index.ts";
-import { providerFetch, type Transport } from "../src/provider.ts";
+import type { Wire } from "../src/protocol.ts";
+import { providerFetch, providerModels, type Transport } from "../src/provider.ts";
 
 const root = JSON.stringify([
   [
@@ -52,6 +53,42 @@ test("plugin exports the Magpie server and preserves existing provider configura
   expect(await importing.callback()).toMatchObject({ type: "failed" });
   const textImport = await hooks.auth.methods[3].authorize({ payload: "invalid-migration-text" });
   expect(await textImport.callback()).toMatchObject({ type: "failed" });
+});
+
+test("provider lists only text conversation models until Magpie supports model purposes", async () => {
+  const row = (id: string, codes: number[], methods = ["generateContent"]) => {
+    const model: Wire = Array(65).fill(null);
+    model[0] = `models/${id}`;
+    model[3] = id;
+    model[5] = 131072;
+    model[6] = 8192;
+    model[7] = methods;
+    model[64] = codes;
+    return model;
+  };
+  const models = await providerModels({
+    ...transport,
+    async models() {
+      return [
+        [
+          row("chat", [10]),
+          row("gemini-multimodal", [1]),
+          row("speech", [37]),
+          row("image", [21]),
+          row("embed", [], ["embedContent"]),
+          row("live", [26]),
+        ],
+      ];
+    },
+    async buildModels() {
+      return [{ name: "models/build-embed", supportedGenerationMethods: ["embedContent"] }];
+    },
+  });
+  expect(Object.keys(models)).toEqual(["chat", "gemini-multimodal"]);
+  expect(models["gemini-multimodal"]).toMatchObject({
+    modalities: { input: ["text", "image", "audio", "video", "pdf"], output: ["text"] },
+    api: { id: "gemini-multimodal", npm: "@ai-sdk/google" },
+  });
 });
 
 test("Gemini fetch returns SSE chunks and aggregates the same unary response", async () => {
@@ -110,7 +147,131 @@ test("Gemini fetch rejects unsupported input locally and retains upstream HTTP e
     body: JSON.stringify(request),
   });
   expect(response.status).toBe(429);
-  expect((await response.json()).error.status).toBe("RESOURCE_EXHAUSTED");
+  expect((await response.json()).error).toMatchObject({
+    status: "RESOURCE_EXHAUSTED",
+    message: expect.stringContaining("private protobuf error"),
+  });
+});
+
+test("generation and auxiliary endpoints preserve raw error bodies and HTTP status", async () => {
+  for (const [status, body] of [
+    [400, '{\n  "diagnostic": {"原因": "未知参数", "fields": ["temperature"]}\n}\n'],
+    [429, '[8,"Quota exceeded",[{"retryAfter":30}]]'],
+    [403, '[null,[7,"Model access denied"],{"context":"fixture"}]'],
+    [502, "<!doctype html><html><body>Bad gateway</body></html>"],
+    [400, '{"error":'],
+    [400, "  Plain-text error\nwith context\n"],
+  ] as const) {
+    const fetch = providerFetch({
+      ...transport,
+      async generate() {
+        return new Response(body, { status });
+      },
+      async call() {
+        return new Response(body, { status });
+      },
+    });
+    for (const [url, input] of [
+      [`${base}generateContent`, request],
+      [`${base}streamGenerateContent`, { ...request, tools: [{ googleSearch: {} }] }],
+      [`${base}countTokens`, request],
+      ["https://generativelanguage.googleapis.com/v1beta/embeddings", { model: "embed", input: "hello" }],
+    ] as const) {
+      const response = await fetch(url, { method: "POST", body: JSON.stringify(input) });
+      expect(response.status).toBe(status);
+      expect((await response.json()).error).toMatchObject({
+        code: status,
+        message: `Google AI Studio returned HTTP ${status}: ${body}`,
+      });
+    }
+  }
+});
+
+test("empty or unreadable upstream error bodies retain HTTP status", async () => {
+  for (const body of [
+    null,
+    "",
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("upstream connection lost"));
+      },
+    }),
+  ]) {
+    const fetch = providerFetch({
+      ...transport,
+      async generate() {
+        return new Response(body, { status: 400 });
+      },
+    });
+    const response = await fetch(`${base}generateContent`, { method: "POST", body: JSON.stringify(request) });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.message).toBe("Google AI Studio returned HTTP 400");
+  }
+});
+
+test("raw errors keep an 8 KiB prefix and mark truncation without waiting for EOF", async () => {
+  for (const length of [8191, 8192, 8193]) {
+    const body = "x".repeat(length);
+    const fetch = providerFetch({
+      ...transport,
+      async generate() {
+        return new Response(body, { status: 400 });
+      },
+    });
+    const response = await fetch(`${base}generateContent`, { method: "POST", body: JSON.stringify(request) });
+    expect((await response.json()).error.message).toBe(
+      `Google AI Studio returned HTTP 400: ${"x".repeat(Math.min(length, 8192))}${length > 8192 ? "\n[truncated]" : ""}`,
+    );
+  }
+  let cancelled = false;
+  const fetch = providerFetch({
+    ...transport,
+    async generate() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`${"x".repeat(8191)}中tail`));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 400 },
+      );
+    },
+  });
+  const response = await fetch(`${base}generateContent`, { method: "POST", body: JSON.stringify(request) });
+  expect((await response.json()).error.message).toBe(
+    `Google AI Studio returned HTTP 400: ${"x".repeat(8191)}\n[truncated]`,
+  );
+  expect(cancelled).toBe(true);
+});
+
+test("Build JSON errors remain visible for unary and streaming generation", async () => {
+  const body = '{"error":{"message":"Invalid function declaration","details":[{"field":"name"}]}}';
+  for (const method of ["generateContent", "streamGenerateContent"]) {
+    const fetch = providerFetch({
+      ...transport,
+      async call() {
+        throw new Error("unused");
+      },
+      async generate() {
+        const wire = [body];
+        return new Response(JSON.stringify(method === "generateContent" ? wire : [[wire]]));
+      },
+    });
+    const response = await fetch(`${base}${method}`, {
+      method: "POST",
+      body: JSON.stringify({ ...request, tools: [{ googleSearch: {} }] }),
+    });
+    if (method === "generateContent")
+      expect((await response.json()).error.message).toBe(`AI Studio Build: ${body}`);
+    else {
+      const events = (await response.text()).trim().split("\n\n");
+      expect(events).toHaveLength(1);
+      expect(JSON.parse(events[0].slice(6)).error.message).toBe(`AI Studio Build: ${body}`);
+    }
+  }
 });
 
 test("a truncated stream emits an error instead of a successful finish", async () => {

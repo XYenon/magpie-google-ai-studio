@@ -181,9 +181,11 @@ test("complete frames arrive before EOF and missing finish or root fails", async
   await expect(
     aggregateGenerate(decodeGenerateStream(byteStream(`[[${JSON.stringify(finishFrame)}`))),
   ).rejects.toThrow("truncated");
-  await expect(
-    aggregateGenerate(decodeGenerateStream(byteStream('[null,[429,"private error"]]'))),
-  ).rejects.toThrow("private RPC error");
+  for (const prefix of ["null", "[]"]) {
+    await expect(
+      aggregateGenerate(decodeGenerateStream(byteStream(`[${prefix},[429,"private error"]]`))),
+    ).rejects.toThrow(`private RPC error: [${prefix},[429,"private error"]]`);
+  }
 });
 
 test("function args preserve every Struct type, IDs, special keys, and thought signatures", async () => {
@@ -355,4 +357,14 @@ test("continuation carries the opaque token, suppresses intermediate finishes, a
     }),
   );
   expect((limited.candidates as Record<string, unknown>[])[0].finishReason).toBe("MAX_TOKENS");
+  await expect(
+    aggregateGenerate(
+      decodeGenerateStream(byteStream(JSON.stringify([[first]])), {
+        limit: 50000,
+        async resume() {
+          return Response.json({ error: { message: "Continuation quota exceeded" } }, { status: 429 });
+        },
+      }),
+    ),
+  ).rejects.toThrow('HTTP 429: {"error":{"message":"Continuation quota exceeded"}}');
 });

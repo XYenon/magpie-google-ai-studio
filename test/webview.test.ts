@@ -206,6 +206,10 @@ test.skipIf(!enabled)(
     const previousProxy = proxyVars.map((key) => [key, process.env[key]] as const);
     const clients: StudioClient[] = [];
     let seed = true;
+    let rejectRequests = false;
+    const rejectionBody = JSON.stringify({
+      diagnostic: { reason: "Fixture input rejected", context: "x".repeat(800) },
+    });
     const key = join(root, "key.pem"),
       cert = join(root, "cert.pem");
     const generated = Bun.spawnSync(
@@ -319,6 +323,7 @@ test.skipIf(!enabled)(
         )
           return new Response("unauthenticated fixture", { status: 403, headers });
         headers.set("content-type", "application/json+protobuf");
+        if (rejectRequests) return new Response(rejectionBody, { status: 400, headers });
         const content = [[[null, "OK"]], "model"];
         const frame = [[[content, 1, 0]], null, [6, 1, 7]];
         const model = [...row];
@@ -457,6 +462,19 @@ test.skipIf(!enabled)(
         status: 200,
         body: { candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] },
       });
+      rejectRequests = true;
+      const rejected = await providerFetch(restarted)(
+        "https://generativelanguage.googleapis.com/v1beta/models/fixture:generateContent",
+        {
+          method: "POST",
+          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Reject this" }] }] }),
+        },
+      );
+      expect({ status: rejected.status, body: await rejected.json() }).toMatchObject({
+        status: 400,
+        body: { error: { message: `Google AI Studio returned HTTP 400: ${rejectionBody}` } },
+      });
+      await expect(restarted.buildModels()).rejects.toThrow(`HTTP 400: ${rejectionBody}`);
     } finally {
       for (const client of clients) await client.close();
       if (previous === undefined) delete process.env.MAGPIE_AISTUDIO_DATA_DIR;

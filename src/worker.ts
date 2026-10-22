@@ -1,5 +1,5 @@
 import { StudioBrowser } from "./browser.ts";
-import type { Wire } from "./protocol.ts";
+import { errorBody, type Wire } from "./protocol.ts";
 import { proxySignature } from "./proxy.ts";
 import type { Options, Session } from "./session.ts";
 
@@ -81,13 +81,12 @@ try {
         }
         process.stdout.write(`${JSON.stringify({ id: command.id, value })}\n`);
       } catch (error) {
-        // Page exceptions can include request data, so do not log their stack or
-        // entire message. Only locally authored, bounded diagnostics cross IPC.
+        // Keep diagnostics bounded across IPC without serializing exception stacks.
         const message = error instanceof Error ? error.message : "Browser operation failed";
         process.stdout.write(
           `${JSON.stringify({
             id: command.id,
-            error: message.slice(0, 500),
+            error: errorBody(message),
             signIn: (error as { signIn?: string }).signIn,
           })}\n`,
         );

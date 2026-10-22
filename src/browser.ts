@@ -2,7 +2,7 @@ import { access, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { chromePath } from "./dependencies.ts";
 import { cancelFetch, INSTALL, launchFetch, readFetch } from "./page.ts";
-import { parseModels, parseSparseJSON, type Wire } from "./protocol.ts";
+import { parseModels, parseSparseJSON, responseError, type Wire } from "./protocol.ts";
 import { browserProxy } from "./proxy.ts";
 import { type Options, type Session, type StorageState, storageState } from "./session.ts";
 
@@ -339,7 +339,9 @@ export class StudioBrowser {
               signIn: "expired",
             });
           if (result.status < 200 || result.status >= 300)
-            throw new Error(`AI Studio ${method} returned HTTP ${result.status}`);
+            throw new Error(
+              `AI Studio ${method}: ${await responseError(new Response(Buffer.concat(chunks), { status: result.status }))}`,
+            );
           return new Response(Buffer.concat(chunks));
         }
         await Bun.sleep(25);

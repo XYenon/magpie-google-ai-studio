@@ -13,6 +13,7 @@ import {
   encodeGenerateRequest,
   parseModels,
   parseSparseJSON,
+  responseError,
   type Wire,
 } from "./protocol.ts";
 
@@ -93,10 +94,7 @@ export function providerFetch(
         signal,
       );
       if (!response.ok) {
-        // Google private errors use protobuf arrays. Give Magpie the actual
-        // status for account failover without passing cookies or page bodies.
-        await response.body?.cancel();
-        return errorResponse(response.status, `Google AI Studio returned HTTP ${response.status}`);
+        return errorResponse(response.status, await responseError(response));
       }
       if (!response.body) return errorResponse(502, "AI Studio returned no response body");
       if (build && match[2] === "generateContent") {
@@ -169,44 +167,25 @@ export function providerFetch(
 
 export async function providerModels(transport: Transport): Promise<Record<string, Record<string, unknown>>> {
   const models = parseModels(await transport.models());
-  if (transport.buildModels) {
-    let catalog: Record<string, unknown>[] = [];
-    try {
-      catalog = await transport.buildModels();
-    } catch {
-      console.warn("AI Studio Build catalog unavailable; retaining the Playground model catalog");
-    }
-    for (const model of catalog) {
-      const methods = model.supportedGenerationMethods as string[] | undefined;
-      if (!methods?.includes("embedContent")) continue;
-      const id = String(model.name).replace(/^models\//, "");
-      models[id] = {
-        id,
-        name: model.displayName || id,
-        limit: { context: model.inputTokenLimit, output: 0 },
-        capabilities: {
-          toolcall: false,
-          reasoning: false,
-          attachment: false,
-          input: { text: true },
-          output: { text: false },
-        },
-        modalities: { input: ["text"], output: [] },
-      };
-    }
-  }
+  // Temporarily list only text conversation models, without Build embeddings,
+  // until Magpie supports model purposes: https://github.com/yetone/magpie/issues/3279
   return Object.fromEntries(
-    Object.entries(models).map(([id, model]) => [
-      id,
-      {
-        ...model,
-        api: {
-          id,
-          npm: "@ai-sdk/google",
-          url: "https://generativelanguage.googleapis.com/v1beta",
+    Object.entries(models)
+      .filter(([, model]) => {
+        const { output } = model.modalities as { output: string[] };
+        return output.length === 1 && output[0] === "text";
+      })
+      .map(([id, model]) => [
+        id,
+        {
+          ...model,
+          api: {
+            id,
+            npm: "@ai-sdk/google",
+            url: "https://generativelanguage.googleapis.com/v1beta",
+          },
         },
-      },
-    ]),
+      ]),
   );
 }
 
@@ -235,8 +214,7 @@ async function auxiliaryFetch(transport: Transport, request: Request): Promise<R
         request.signal,
       );
       if (!response.ok) {
-        await response.body?.cancel();
-        return errorResponse(response.status, "AI Studio CountTokens failed");
+        return errorResponse(response.status, await responseError(response));
       }
       const value = parseSparseJSON(await response.text()) as Wire;
       if (typeof value[0] !== "number") throw new Error("Invalid CountTokens response");
@@ -262,8 +240,7 @@ async function auxiliaryFetch(transport: Transport, request: Request): Promise<R
         request.signal,
       );
       if (!response.ok) {
-        await response.body?.cancel();
-        return errorResponse(response.status, "AI Studio embeddings failed");
+        return errorResponse(response.status, await responseError(response));
       }
       const result = await decodeBuildUnary(response);
       const embeddings = result.embeddings as { values: number[] }[];

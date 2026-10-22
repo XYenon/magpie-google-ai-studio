@@ -21,7 +21,7 @@ test.skipIf(process.env.AISTUDIO_DOCKER_TEST !== "1")(
     };
     try {
       await command([process.execPath, "pm", "pack", "--destination", directory]);
-      await command(["tar", "-xzf", join(directory, "magpie-google-ai-studio-0.1.0.tgz"), "-C", directory]);
+      await command(["tar", "-xzf", join(directory, "magpie-google-ai-studio-0.1.1.tgz"), "-C", directory]);
       await command(["docker", "volume", "create", volume]);
       await command([
         "docker",
