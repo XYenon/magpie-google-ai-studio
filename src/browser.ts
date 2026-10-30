@@ -337,10 +337,14 @@ export class StudioBrowser {
           if (result.status === 401)
             throw Object.assign(new Error("Google session expired"), {
               signIn: "expired",
+              status: result.status,
             });
           if (result.status < 200 || result.status >= 300)
-            throw new Error(
-              `AI Studio ${method}: ${await responseError(new Response(Buffer.concat(chunks), { status: result.status }))}`,
+            throw Object.assign(
+              new Error(
+                `AI Studio ${method}: ${await responseError(new Response(Buffer.concat(chunks), { status: result.status }))}`,
+              ),
+              { status: result.status },
             );
           return new Response(Buffer.concat(chunks));
         }

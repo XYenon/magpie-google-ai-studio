@@ -88,6 +88,7 @@ try {
             id: command.id,
             error: errorBody(message),
             signIn: (error as { signIn?: string }).signIn,
+            status: (error as { status?: number }).status,
           })}\n`,
         );
       }

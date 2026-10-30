@@ -16,6 +16,7 @@ import {
   responseError,
   type Wire,
 } from "./protocol.ts";
+import { speechAudio, speechRequest } from "./speech.ts";
 
 export interface Transport {
   models(): Promise<Wire>;
@@ -55,6 +56,7 @@ export function providerFetch(
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
+    if (url.pathname.endsWith("/audio/speech")) return speechFetch(transport, request);
     if (
       transport.call &&
       /\/(embeddings|models\/[^/:]+:(embedContent|batchEmbedContents|countTokens))$/.test(url.pathname)
@@ -167,26 +169,84 @@ export function providerFetch(
 
 export async function providerModels(transport: Transport): Promise<Record<string, Record<string, unknown>>> {
   const models = parseModels(await transport.models());
-  // Temporarily list only text conversation models, without Build embeddings,
-  // until Magpie supports model purposes: https://github.com/yetone/magpie/issues/3279
-  return Object.fromEntries(
-    Object.entries(models)
-      .filter(([, model]) => {
-        const { output } = model.modalities as { output: string[] };
-        return output.length === 1 && output[0] === "text";
-      })
-      .map(([id, model]) => [
+  if (transport.buildModels) {
+    let buildCatalog: Record<string, unknown>[] = [];
+    try {
+      buildCatalog = await transport.buildModels();
+    } catch (error) {
+      // Build access is optional; only denied or absent endpoints may omit embeddings.
+      const status = (error as { status?: number } | null)?.status;
+      if (status !== 403 && status !== 404) throw error;
+      console.warn("AI Studio Build catalog unavailable; retaining the Playground model catalog");
+    }
+    for (const model of buildCatalog) {
+      const generationMethods = model.supportedGenerationMethods as string[] | undefined;
+      if (!generationMethods?.includes("embedContent")) continue;
+      const id = String(model.name).replace(/^models\//, "");
+      models[id] = {
         id,
-        {
-          ...model,
-          api: {
-            id,
-            npm: "@ai-sdk/google",
-            url: "https://generativelanguage.googleapis.com/v1beta",
-          },
+        name: model.displayName || id,
+        limit: { context: model.inputTokenLimit, output: 0 },
+        capabilities: {
+          toolcall: false,
+          reasoning: false,
+          attachment: false,
+          input: { text: true },
+          // Magpie v0.1.2038+ distinguishes this from unspecified outputs.
+          output: { text: false },
         },
-      ]),
+        modalities: { input: ["text"], output: [] },
+      };
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(models).map(([id, model]) => [
+      id,
+      {
+        ...model,
+        api: {
+          id,
+          npm: "@ai-sdk/google",
+          url: "https://generativelanguage.googleapis.com/v1beta",
+        },
+      },
+    ]),
   );
+}
+
+async function speechFetch(transport: Transport, request: Request): Promise<Response> {
+  if (request.method !== "POST") return errorResponse(405, "Use POST for speech generation");
+  if (new URL(request.url).origin !== "https://generativelanguage.googleapis.com")
+    return errorResponse(400, "Unexpected Gemini API origin");
+  const { signal } = request;
+  let generationStarted = false;
+  try {
+    signal.throwIfAborted();
+    const data = await request.json();
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Expected a JSON object");
+    const { model, format, body } = speechRequest(data);
+    if (!transport.call) return errorResponse(502, "AI Studio Build transport is unavailable");
+    encodeBuildGenerate(model, body, false);
+    generationStarted = true;
+    const response = await transport.generate(
+      model,
+      body,
+      () => encodeBuildGenerate(model, body, false),
+      signal,
+    );
+    if (!response.ok) return errorResponse(response.status, await responseError(response));
+    const result = await decodeBuildUnary(response);
+    signal.throwIfAborted();
+    return speechAudio(result, format);
+  } catch (error) {
+    if (signal.aborted) throw signal.reason;
+    if ((error as { signIn?: string }).signIn === "expired")
+      return errorResponse(401, "Google AI Studio session expired; sign in again");
+    return errorResponse(
+      generationStarted ? 502 : 400,
+      error instanceof Error ? error.message : "Speech request failed",
+    );
+  }
 }
 
 async function auxiliaryFetch(transport: Transport, request: Request): Promise<Response> {

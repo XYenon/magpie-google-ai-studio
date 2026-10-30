@@ -149,7 +149,7 @@ magpie plugin options magpie-google-ai-studio '{"chromePath":"/usr/bin/chromium"
 ## 请求流程
 
 1. Magpie 把客户端请求转换为 Gemini 格式，调用插件的 `fetch`。
-2. 普通聊天使用 Playground 的 MakerSuite 协议，工具、Schema、媒体和语音请求使用 AI Studio Build 的原生 Gemini JSON 转发。两种路径都由账号对应的 WebView 取得新的 WAA 证明。
+2. 普通聊天使用 Playground 的 MakerSuite 协议；工具、Schema、媒体输入、嵌入以及 `/audio/speech` 语音合成请求使用 AI Studio Build 转发。两种路径都由账号对应的 WebView 取得新的 WAA 证明。
 3. WebView 在 AI Studio 页面内发送带 cookies 的原生 `fetch`，按需读取响应。
 4. 插件返回 Gemini JSON 或 SSE。Build 路径保留原生响应中的工具结果、思考签名、引用来源和用量信息。
 
@@ -161,7 +161,7 @@ AI Studio 会拒绝 Bun 默认无头 Chrome 的部分浏览器标记，即使账
 
 ## 支持的功能
 
-模型列表来自当前账号的 Playground 目录，暂时只列出输出为文本的会话模型。图片生成、TTS 和 embedding 模型暂不列出，等待 Magpie 支持模型用途分类，见 [magpie#3279](https://github.com/yetone/magpie/issues/3279)。底层调用接口仍保留下表中的功能。插件根据模型系列及目录能力声明输入输出类型，不使用固定的模型清单。每个模型能接受的工具、Schema 和媒体仍由 Google 服务端决定。
+模型列表聚合当前账号的 Playground 目录以及 Build 目录中的嵌入模型。插件根据目录能力显式声明模型的输入输出类型与模态（例如嵌入模型的 `output: { text: false }`，TTS 模型的 `output: { text: false, audio: true }`），供 Magpie（v0.1.2038+）按用途区分并展示对话、嵌入、图片生成和 TTS 语音模型。若 Build 目录不可用，插件会自动回退保留 Playground 目录。插件不使用固定的模型清单，每个模型能接受的工具、Schema 和媒体仍由 Google 服务端决定。
 
 普通文本对话使用 Playground 路径。包含工具或工具配置、结构化输出、媒体输入，以及语音等配置的请求使用 Build 代理路径。模型出现在 Playground 目录中，不代表同一账号在 Build 路径上也有权限或配额。实测中，同一账号的 `gemini-4-argon` 在 Playground 成功，Build 流式请求返回 403，非流式请求返回配额上限为 0 的 429。插件保留这些上游错误，不自动切换路径或重试生成。
 
@@ -169,17 +169,18 @@ AI Studio 会拒绝 Bun 默认无头 Chrome 的部分浏览器标记，即使账
 
 插件目前不提供剩余额度查询。官网存在 `GetModelQuota` 接口，但当前账号查询 `gemini-3.8-flash`、`gemini-4-argon` 均返回空结果，不能据此判断额度为 0 或无限。官网代码用该接口显示 Veo 的剩余生成次数，但当前账号查询相应 Veo 模型返回 404。`ListQuotaModels` 返回模型分类而非剩余数值，生成响应中的 `usageMetadata` 也仅表示本次消耗。AIStudio2API 根据 429 错误及重试时间判断冷却，未实现剩余额度查询。
 
-| 功能                       | 接口和行为                                                                                                                                                                               |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 对话生成                   | `generateContent`、`streamGenerateContent`，支持系统指令、思考配置和签名回传。流中断会报错，不补造成功的完成帧。                                                                         |
-| 函数调用                   | 支持 `AUTO`、`NONE`、`ANY`、`VALIDATED` 和 `allowedFunctionNames`，工具参数通过 `parameters` 或 `parametersJsonSchema` 原样交给服务端。`NONE` 会移除用户函数声明。                       |
-| 结构化输出                 | 支持 `responseSchema` 和 `responseJsonSchema`。后者转换为网页接受的原生 `responseFormat`，保留 `$defs`、`$ref`、`additionalProperties` 和数值限制，交给服务端处理。                      |
-| 图片、音频、视频、PDF 输入 | Gemini 聊天模型支持 `inlineData`，Magpie 的模型能力中也声明对应输入类型。`fileData` 会原样传递，但插件不替客户端上传文件或赋予远端文件访问权限。                                         |
-| 图片和语音生成             | 使用账号可用的图片模型或 TTS 模型，通过 `responseModalities`、`speechConfig` 配置，返回原生 `inlineData`。                                                                               |
-| 内置工具                   | 支持透传 `codeExecution`、`googleSearch`、`urlContext`、`googleMaps`，保留执行结果和引用元数据。可用性取决于模型。                                                                       |
-| Embeddings                 | 支持 Magpie 的 OpenAI 格式 `/v1/embeddings`，以及插件内部的 Gemini `embedContent`、`batchEmbedContents`。支持批量、`dimensions`、`float` 和 `base64`，每批最多 100 条并保持输入顺序。    |
-| Token 计数                 | 插件支持 Gemini `countTokens`，接受 `contents` 或 `generateContentRequest`，调用 AI Studio 的原生计数接口。                                                                              |
-| 自动续写                   | Playground 模型目录声明续写能力时，插件使用服务端续写令牌继续生成，并合并 JSON 或 SSE 和用量。每轮最多 32768 个输出 token，到达调用方的 `maxOutputTokens` 后结束。Build 路径不模拟续写。 |
+| 功能                       | 接口和行为                                                                                                                                                                                                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 对话生成                   | `generateContent`、`streamGenerateContent`，支持系统指令、思考配置和签名回传。流中断会报错，不补造成功的完成帧。                                                                                                                                                  |
+| 函数调用                   | 支持 `AUTO`、`NONE`、`ANY`、`VALIDATED` 和 `allowedFunctionNames`，工具参数通过 `parameters` 或 `parametersJsonSchema` 原样交给服务端。`NONE` 会移除用户函数声明。                                                                                                |
+| 结构化输出                 | 支持 `responseSchema` 和 `responseJsonSchema`。后者转换为网页接受的原生 `responseFormat`，保留 `$defs`、`$ref`、`additionalProperties` 和数值限制，交给服务端处理。                                                                                               |
+| 图片、音频、视频、PDF 输入 | Gemini 聊天模型支持 `inlineData`，Magpie 的模型能力中也声明对应输入类型。`fileData` 会原样传递，但插件不替客户端上传文件或赋予远端文件访问权限。                                                                                                                  |
+| 图片生成与编辑             | 支持 Magpie 的图片路由（Magpie v0.1.2075+），转换为 Build 原生流式 `streamGenerateContent`，保留 `responseModalities: ["TEXT", "IMAGE"]` 与 `inlineData` 图片字节。                                                                                               |
+| 语音合成 (TTS)             | 支持 Magpie 的 `/audio/speech` 端点，转换为 Build 原生单次 `generateContent`。默认输出 24 kHz 单声道 16-bit PCM WAV（带 44 字节标准文件头），亦支持返回无头 `pcm`；支持 30 种 Gemini 预设音色（如 `Kore`、`Puck` 等，大小写不敏感）及 `instructions` 风格提示词。 |
+| 内置工具                   | 支持透传 `codeExecution`、`googleSearch`、`urlContext`、`googleMaps`，保留执行结果和引用元数据。可用性取决于模型。                                                                                                                                                |
+| Embeddings                 | 支持 Magpie 的 OpenAI 格式 `/v1/embeddings`，以及插件内部的 Gemini `embedContent`、`batchEmbedContents`。支持批量、`dimensions`、`float` 和 `base64`，每批最多 100 条并保持输入顺序。                                                                             |
+| Token 计数                 | 插件支持 Gemini `countTokens`，接受 `contents` 或 `generateContentRequest`，调用 AI Studio 的原生计数接口。                                                                                                                                                       |
+| 自动续写                   | Playground 模型目录声明续写能力时，插件使用服务端续写令牌继续生成，并合并 JSON 或 SSE 和用量。每轮最多 32768 个输出 token，到达调用方的 `maxOutputTokens` 后结束。Build 路径不模拟续写。                                                                          |
 
 插件保留 Google 的原生 `promptFeedback` 拦截说明，包括搜索可能返回的 `PROHIBITED_CONTENT`。响应既无候选答案，也无明确拦截原因时，插件会报错。
 
@@ -207,15 +208,93 @@ AI Studio 会拒绝 Bun 默认无头 Chrome 的部分浏览器标记，即使账
 }
 ```
 
-Magpie 的 embeddings 请求正文示例：
+### 手动调用接口说明（非 Agent 自动调用）
 
-```json
-{
-  "model": "google-ai-studio/gemini-embedding-001",
-  "input": ["第一段文本", "第二段文本"],
-  "dimensions": 128,
-  "encoding_format": "float"
-}
+Magpie 的 Agent 对话会自动调度模型处理文本问答与工具调用。但对于**语音合成 (TTS)**、**文本嵌入 (Embeddings)**、**图片生成与编辑**以及 **Token 计数**，Magpie 暂不支持自动指派给 Agent 作为工具调用，需由外部程序、下游应用（如 RAG 检索、自动化工作流）或客户端通过 Magpie 的 API 手动发起调用。
+
+#### 1. 语音合成 (TTS)
+
+通过 Magpie 的 OpenAI 兼容语音端点进行文本转语音。插件将其转为 AI Studio Build 的原生单次生成，返回 PCM 或 WAV 音频流。
+
+- **端点**：`POST /v1/audio/speech`
+- **参数**：
+  - `model`（字符串，必填）：账号可用的 TTS 模型，使用 `google-ai-studio/<tts-model-id>`，将占位符替换为账号目录中的实际模型名称。
+  - `input`（字符串，必填）：需要合成的文本内容。
+  - `voice`（字符串，必填）：Gemini 预设音色名称（支持 `Kore`、`Puck`、`Zephyr`、`Fenrir`、`Aoede` 等 30 种音色，大小写不敏感）。
+  - `response_format`（字符串，可选）：音频格式，支持 `"wav"`（默认，带 44 字节文件头的标准 24 kHz 单声道 16-bit PCM WAV）和 `"pcm"`（纯 PCM 数据）。
+  - `instructions`（字符串，可选）：语音风格与情感提示词（如 `"热情亲切"`、`"Cheerfully"`）。
+  - `speed`（数值，可选）：仅支持 `1`。
+
+调用示例：
+
+```sh
+curl http://<magpie-host>:<port>/v1/audio/speech \
+  -H "Authorization: Bearer <magpie-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google-ai-studio/<tts-model-id>",
+    "input": "你好，这是一段通过 Google AI Studio 插件生成的测试语音。",
+    "voice": "Kore",
+    "response_format": "wav",
+    "instructions": "热情自然"
+  }' \
+  --output speech.wav
+```
+
+#### 2. 文本嵌入 (Embeddings)
+
+用于知识库检索、向量检索等 RAG 场景。通过 Magpie 网关使用 OpenAI 兼容端点，支持批量文本。
+
+- **端点**：`POST /v1/embeddings`。
+- **参数**：
+  - `model`（字符串，必填）：账号可用的嵌入模型，使用 `google-ai-studio/<embedding-model-id>`。
+  - `input`（字符串或字符串数组，必填）：待计算嵌入的文本或文本列表。
+  - `dimensions`（数字，可选）：指定的向量输出维度。
+  - `encoding_format`（字符串，可选）：`"float"`（默认）或 `"base64"`。
+
+调用示例：
+
+```sh
+curl http://<magpie-host>:<port>/v1/embeddings \
+  -H "Authorization: Bearer <magpie-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google-ai-studio/<embedding-model-id>",
+    "input": ["第一段待检索文本", "第二段待检索文本"],
+    "dimensions": 768,
+    "encoding_format": "float"
+  }'
+```
+
+#### 3. 图片生成与编辑 (Images)
+
+Magpie（v0.1.2075+）支持通过 OpenAI 兼容的图片生成与编辑端点发起绘图请求，插件将其转发为 Build 原生流式 `streamGenerateContent`，并在响应中保留 `inlineData` 图片字节。
+
+- **图片生成端点**：`POST /v1/images/generations`
+- **图片编辑端点**：`POST /v1/images/edits`
+
+示例中的 `<gemini-image-model-id>` 必须替换为账号可用、出现在 Magpie 生图选择器中的 Gemini 图片模型。独立 Imagen 模型不支持。
+
+生成示例：
+
+```sh
+curl http://<magpie-host>:<port>/v1/images/generations \
+  -H "Authorization: Bearer <magpie-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "google-ai-studio/<gemini-image-model-id>",
+    "prompt": "一只站在樱花枝头的蓝色喜鹊，高清细节，水彩画风格"
+  }'
+```
+
+编辑示例：
+
+```sh
+curl http://<magpie-host>:<port>/v1/images/edits \
+  -H "Authorization: Bearer <magpie-token>" \
+  -F model="google-ai-studio/<gemini-image-model-id>" \
+  -F prompt="在背景中添加盛开的樱花" \
+  -F image="@base.png"
 ```
 
 ### 尚不能完整提供的接口

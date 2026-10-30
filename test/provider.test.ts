@@ -55,7 +55,7 @@ test("plugin exports the Magpie server and preserves existing provider configura
   expect(await textImport.callback()).toMatchObject({ type: "failed" });
 });
 
-test("provider lists only text conversation models until Magpie supports model purposes", async () => {
+test("provider declares model outputs so Magpie can separate chat from embeddings and TTS", async () => {
   const row = (id: string, codes: number[], methods = ["generateContent"]) => {
     const model: Wire = Array(65).fill(null);
     model[0] = `models/${id}`;
@@ -81,14 +81,95 @@ test("provider lists only text conversation models until Magpie supports model p
       ];
     },
     async buildModels() {
-      return [{ name: "models/build-embed", supportedGenerationMethods: ["embedContent"] }];
+      return [
+        {
+          name: "models/build-embed",
+          displayName: "Build Embedding",
+          inputTokenLimit: 2048,
+          supportedGenerationMethods: ["embedContent", "batchEmbedContents"],
+        },
+        { name: "models/build-chat", supportedGenerationMethods: ["generateContent"] },
+      ];
     },
   });
-  expect(Object.keys(models)).toEqual(["chat", "gemini-multimodal"]);
+  expect(Object.keys(models)).toEqual(["chat", "gemini-multimodal", "speech", "image", "build-embed"]);
   expect(models["gemini-multimodal"]).toMatchObject({
     modalities: { input: ["text", "image", "audio", "video", "pdf"], output: ["text"] },
     api: { id: "gemini-multimodal", npm: "@ai-sdk/google" },
   });
+  expect(models.speech).toMatchObject({
+    capabilities: { output: { text: false, audio: true } },
+    modalities: { input: ["text"], output: ["audio"] },
+    api: { id: "speech", npm: "@ai-sdk/google" },
+  });
+  expect(models.image).toMatchObject({
+    capabilities: { output: { text: true, image: true } },
+    modalities: { output: ["text", "image"] },
+  });
+  expect(models["build-embed"]).toMatchObject({
+    id: "build-embed",
+    name: "Build Embedding",
+    limit: { context: 2048, output: 0 },
+    capabilities: {
+      reasoning: false,
+      toolcall: false,
+      attachment: false,
+      input: { text: true },
+      output: { text: false },
+    },
+    modalities: { input: ["text"], output: [] },
+    api: { id: "build-embed", npm: "@ai-sdk/google" },
+  });
+});
+
+test("provider retains the Playground catalog when the Build catalog is unavailable", async () => {
+  const row: Wire = Array(65).fill(null);
+  row[0] = "models/chat";
+  row[3] = "Chat";
+  row[5] = 131072;
+  row[6] = 8192;
+  row[7] = ["generateContent"];
+  const unavailable = (status: number) => async () => {
+    throw Object.assign(new Error("Build catalog unavailable"), { status });
+  };
+  for (const buildModels of [undefined, unavailable(403), unavailable(404)]) {
+    const models = await providerModels({
+      ...transport,
+      async models() {
+        return [[row]];
+      },
+      buildModels,
+    });
+    expect(Object.keys(models)).toEqual(["chat"]);
+    expect(models.chat).toMatchObject({
+      name: "Chat",
+      api: { id: "chat", npm: "@ai-sdk/google" },
+    });
+  }
+});
+
+test("provider propagates unexpected Build catalog failures", async () => {
+  const row: Wire = ["models/chat", null, null, "Chat", null, 131072, 8192, ["generateContent"]];
+  for (const error of [
+    new SyntaxError("Malformed Build JSON"),
+    new Error("Invalid Build model catalog"),
+    new Error("Build catalog pagination exceeded"),
+    Object.assign(new Error("Session expired"), { status: 401, signIn: "expired" }),
+    Object.assign(new Error("Rate limited"), { status: 429 }),
+    Object.assign(new Error("Server failure"), { status: 500 }),
+  ]) {
+    await expect(
+      providerModels({
+        ...transport,
+        async models() {
+          return [[row]];
+        },
+        async buildModels() {
+          throw error;
+        },
+      }),
+    ).rejects.toBe(error);
+  }
 });
 
 test("Gemini fetch returns SSE chunks and aggregates the same unary response", async () => {

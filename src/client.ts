@@ -69,6 +69,7 @@ export class StudioClient {
             value: unknown;
             error?: string;
             signIn?: string;
+            status?: number;
           };
           buffer = buffer.slice(end + 1);
           const listener = this.pending.get(message.id);
@@ -77,6 +78,7 @@ export class StudioClient {
             listener?.reject(
               Object.assign(new Error(message.error), {
                 signIn: message.signIn,
+                status: message.status,
               }),
             );
           else listener?.resolve(message.value);
