@@ -38,6 +38,15 @@ export class StudioBrowser {
   async open(interactive = false): Promise<void> {
     if (typeof Bun.WebView !== "function")
       throw new Error("The Bun runtime used by Magpie must provide Bun.WebView");
+    try {
+      await this.openBrowser(interactive);
+    } catch (error) {
+      await this.close().catch(() => {});
+      throw error;
+    }
+  }
+
+  private async openBrowser(interactive: boolean): Promise<void> {
     await access(this.session.profile);
     const path = chromePath(this.options.chromePath);
     const configuredArgs = this.options.chromeArgs || [];
