@@ -53,8 +53,27 @@ test.skipIf(!unix)(
       await symlink(`${hostname()}-${process.pid}`, join(profile, "SingletonLock"));
       await writeFile(portFile, "9222\n/devtools/browser/live\n");
       const browser = new StudioBrowser(fakeSession(profile), { chromePath: "/nonexistent/chrome" });
-      await expect(browser.open()).rejects.toThrow("another browser owns its startup lock");
+      await expect(browser.open()).rejects.toThrow(
+        `Chrome profile is in use by ${hostname()}-${process.pid}; close that browser and retry`,
+      );
       expect(await readFile(portFile, "utf8")).toBe("9222\n/devtools/browser/live\n");
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(!unix)(
+  "open rejects a lock owned by another host without removing DevToolsActivePort",
+  async () => {
+    const profile = await mkdtemp(join(tmpdir(), "studio-browser-remote-lock-"));
+    const portFile = join(profile, "DevToolsActivePort");
+    try {
+      await symlink("another-host-12345", join(profile, "SingletonLock"));
+      await writeFile(portFile, "9222\n/devtools/browser/remote\n");
+      const browser = new StudioBrowser(fakeSession(profile), { chromePath: "/nonexistent/chrome" });
+      await expect(browser.open()).rejects.toThrow("Chrome profile is in use by another-host-12345");
+      expect(await readFile(portFile, "utf8")).toBe("9222\n/devtools/browser/remote\n");
     } finally {
       await rm(profile, { recursive: true, force: true });
     }
@@ -79,3 +98,21 @@ test.skipIf(!unix)(
     }
   },
 );
+
+test.skipIf(!unix)("open reports a signal when Chrome is killed before starting WebView", async () => {
+  const root = await mkdtemp(join(tmpdir(), "studio-browser-signal-"));
+  const profile = join(root, "profile");
+  const fakeChrome = join(root, "fake-chrome.sh");
+  await mkdir(profile);
+  await writeFile(fakeChrome, "#!/bin/sh\nkill -9 $$\n");
+  await chmod(fakeChrome, 0o755);
+  const browser = new StudioBrowser(fakeSession(profile), { chromePath: fakeChrome });
+  try {
+    await expect(browser.open()).rejects.toThrow(
+      "Chrome exited before starting WebView (exit none, signal SIGKILL)",
+    );
+  } finally {
+    await browser.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
