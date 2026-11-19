@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,7 +21,9 @@ test.skipIf(process.env.AISTUDIO_DOCKER_TEST !== "1")(
     };
     try {
       await command([process.execPath, "pm", "pack", "--destination", directory]);
-      await command(["tar", "-xzf", join(directory, "magpie-google-ai-studio-0.1.2.tgz"), "-C", directory]);
+      const archive = (await readdir(directory)).find((name) => name.endsWith(".tgz"));
+      if (!archive) throw new Error("bun pm pack did not produce a tarball");
+      await command(["tar", "-xzf", join(directory, archive), "-C", directory]);
       await command(["docker", "volume", "create", volume]);
       await command([
         "docker",
