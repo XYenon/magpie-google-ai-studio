@@ -421,6 +421,51 @@ test("a truncated stream emits an error instead of a successful finish", async (
   expect(text).not.toContain('"finishReason":"STOP"');
 });
 
+test("timeouts surface as 504 DEADLINE_EXCEEDED", async () => {
+  const timeout = () => new DOMException("The operation timed out after 1000ms", "TimeoutError");
+  const fetch = providerFetch({
+    ...transport,
+    async generate() {
+      throw timeout();
+    },
+  });
+  const response = await fetch(`${base}generateContent`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  expect(response.status).toBe(504);
+  expect((await response.json()).error).toMatchObject({
+    code: 504,
+    status: "DEADLINE_EXCEEDED",
+    message: "The operation timed out after 1000ms",
+  });
+  const streamFetch = providerFetch({
+    ...transport,
+    async generate() {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(timeout());
+          },
+        }),
+      );
+    },
+  });
+  const stream = await streamFetch(`${base}streamGenerateContent`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  const frames = (await stream.text())
+    .trim()
+    .split("\n\n")
+    .map((frame) => JSON.parse(frame.slice(6)));
+  expect(frames.at(-1).error).toMatchObject({
+    code: 504,
+    status: "DEADLINE_EXCEEDED",
+    message: "The operation timed out after 1000ms",
+  });
+});
+
 test("cancelling Gemini output aborts a pending upstream read", async () => {
   let aborted = false;
   const fetch = providerFetch({

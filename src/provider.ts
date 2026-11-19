@@ -35,18 +35,27 @@ export interface Transport {
   ): Promise<Response>;
 }
 
+const ERROR_STATUS: Record<number, string> = {
+  400: "INVALID_ARGUMENT",
+  401: "UNAUTHENTICATED",
+  403: "PERMISSION_DENIED",
+  404: "NOT_FOUND",
+  405: "METHOD_NOT_ALLOWED",
+  429: "RESOURCE_EXHAUSTED",
+  502: "UNAVAILABLE",
+  504: "DEADLINE_EXCEEDED",
+};
+
+function errorJson(status: number, message: string): Record<string, unknown> {
+  return { error: { code: status, message, status: ERROR_STATUS[status] || "UNKNOWN" } };
+}
+
+function isTimeout(error: unknown): boolean {
+  return (error as { name?: unknown } | null | undefined)?.name === "TimeoutError";
+}
+
 export function errorResponse(status: number, message: string): Response {
-  const names: Record<number, string> = {
-    400: "INVALID_ARGUMENT",
-    401: "UNAUTHENTICATED",
-    403: "PERMISSION_DENIED",
-    404: "NOT_FOUND",
-    405: "METHOD_NOT_ALLOWED",
-    429: "RESOURCE_EXHAUSTED",
-    502: "UNAVAILABLE",
-    504: "DEADLINE_EXCEEDED",
-  };
-  return Response.json({ error: { code: status, message, status: names[status] || "UNKNOWN" } }, { status });
+  return Response.json(errorJson(status, message), { status });
 }
 
 export function providerFetch(
@@ -134,11 +143,9 @@ export function providerFetch(
             else controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`));
           } catch (error) {
             if (cancellation.signal.aborted) return;
-            controller.enqueue(
-              encoder.encode(
-                `data: ${JSON.stringify({ error: { code: 502, status: "UNAVAILABLE", message: error instanceof Error ? error.message : "AI Studio stream interrupted" } })}\n\n`,
-              ),
-            );
+            const status = isTimeout(error) ? 504 : 502;
+            const message = error instanceof Error ? error.message : "AI Studio stream interrupted";
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorJson(status, message))}\n\n`));
             controller.close();
             await chunks.return(undefined);
           }
@@ -160,7 +167,10 @@ export function providerFetch(
       if (request.signal.aborted) throw request.signal.reason;
       if ((error as { signIn?: string }).signIn === "expired")
         return errorResponse(401, "Google AI Studio session expired; sign in again");
-      return errorResponse(502, error instanceof Error ? error.message : "AI Studio request failed");
+      return errorResponse(
+        isTimeout(error) ? 504 : 502,
+        error instanceof Error ? error.message : "AI Studio request failed",
+      );
     }
   };
 }
@@ -288,8 +298,10 @@ async function auxiliaryFetch(transport: Transport, request: Request): Promise<R
     if (request.signal.aborted) throw request.signal.reason;
     if ((error as { signIn?: string }).signIn === "expired")
       return errorResponse(401, "Google AI Studio session expired; sign in again");
+    let status = upstream ? 502 : 400;
+    if (isTimeout(error)) status = 504;
     return errorResponse(
-      upstream ? 502 : 400,
+      status,
       error instanceof Error ? error.message : "AI Studio auxiliary request failed",
     );
   }

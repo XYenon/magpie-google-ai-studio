@@ -24,6 +24,7 @@ export class StudioClient {
   constructor(
     readonly session: Session,
     readonly options: Options = {},
+    private readonly workerPath = fileURLToPath(new URL("./worker.ts", import.meta.url)),
   ) {}
 
   private async rpc<T>(
@@ -35,7 +36,10 @@ export class StudioClient {
     const child = this.child;
     const id = ++this.sequence;
     const promise = new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => this.close(new Error(`AI Studio ${method} timed out`)), timeout);
+      const timer = setTimeout(
+        () => this.close(new DOMException(`AI Studio ${method} timed out`, "TimeoutError")),
+        timeout,
+      );
       this.pending.set(id, {
         resolve(value) {
           clearTimeout(timer);
@@ -89,7 +93,7 @@ export class StudioClient {
   }
 
   private async open(interactive = false, signal?: AbortSignal): Promise<void> {
-    const worker = fileURLToPath(new URL("./worker.ts", import.meta.url));
+    const worker = this.workerPath;
     if (this.child) {
       const probe = Bun.spawn([process.execPath, worker, "--proxy-signature"], {
         stdin: "ignore",
@@ -214,12 +218,26 @@ export class StudioClient {
   ): Promise<Response> {
     const release = await this.lock(signal);
     const id = crypto.randomUUID();
-    const timeoutSignal = AbortSignal.timeout(this.options.timeoutMs || 180_000);
-    const abort = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const timeoutMs = this.options.timeoutMs || 180_000;
+    const timeoutController = new AbortController();
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     let finished = false;
+    const resetTimeout = () => {
+      clearTimeout(timeoutTimer);
+      if (finished) return;
+      timeoutTimer = setTimeout(() => {
+        timeoutController.abort(
+          new DOMException(`The operation timed out after ${timeoutMs}ms`, "TimeoutError"),
+        );
+      }, timeoutMs);
+      timeoutTimer.unref();
+    };
+    resetTimeout();
+    const abort = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
     const cleanup = async () => {
       if (finished) return;
       finished = true;
+      clearTimeout(timeoutTimer);
       abort.removeEventListener("abort", onAbort);
       try {
         if (this.child) await this.rpc("cancel", { requestId: id }, 5000);
@@ -231,7 +249,7 @@ export class StudioClient {
     // Killing an account's isolated process also cancels navigation/bootstrap,
     // not only the final fetch, when the caller disconnects during startup.
     const onAbort = () => {
-      this.close(new DOMException("AI Studio request aborted", "AbortError"));
+      void this.close(abort.reason);
       void cleanup();
     };
     abort.addEventListener("abort", onAbort, { once: true });
@@ -252,7 +270,10 @@ export class StudioClient {
         head = await this.rpc<PageChunk>("poll", { requestId: id });
         if (head.error)
           throw new Error("AI Studio page request failed; sign in again or check the page protocol");
-        if (head.status) break;
+        if (head.status) {
+          resetTimeout();
+          break;
+        }
         await Bun.sleep(25);
       }
       let buffered = head;
@@ -270,14 +291,17 @@ export class StudioClient {
                 error: "",
               };
               if (result.error) throw new Error("AI Studio response stream interrupted");
-              for (const chunk of result.chunks) controller.enqueue(Buffer.from(chunk, "base64"));
+              const chunks = result.chunks;
+              if (chunks.length) resetTimeout();
+              for (const chunk of chunks) controller.enqueue(Buffer.from(chunk, "base64"));
               if (result.done) {
                 await cleanup();
                 controller.close();
                 return;
               }
-              if (result.chunks.length) return;
+              if (chunks.length) return;
               await Bun.sleep(25);
+              abort.throwIfAborted();
               buffered = await this.rpc<PageChunk>("poll", { requestId: id });
             }
             abort.throwIfAborted();
