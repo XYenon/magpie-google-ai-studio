@@ -1,4 +1,5 @@
-import { access, rm } from "node:fs/promises";
+import { access, readlink, rm } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { chromePath } from "./dependencies.ts";
 import { cancelFetch, INSTALL, launchFetch, readFetch } from "./page.ts";
@@ -18,6 +19,27 @@ export interface PageChunk {
   chunks: string[];
   done: boolean;
   error: string;
+}
+
+async function hasLiveLockOwner(profile: string): Promise<boolean> {
+  let target: string;
+  try {
+    target = await readlink(join(profile, "SingletonLock"));
+  } catch {
+    return false;
+  }
+  const match = target.match(/^(.*)-(\d+)$/);
+  if (!match) return true;
+  const [, host, pidText] = match;
+  if (host && host !== hostname()) return true;
+  const pid = Number(pidText);
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 export class StudioBrowser {
@@ -48,6 +70,10 @@ export class StudioBrowser {
 
   private async openBrowser(interactive: boolean): Promise<void> {
     await access(this.session.profile);
+    // Another host or browser instance may still own this profile. Leave its
+    // discovery endpoint intact instead of deleting it and spawning a second Chrome.
+    if (await hasLiveLockOwner(this.session.profile))
+      throw new Error("Chrome profile is in use; another browser owns its startup lock");
     const path = chromePath(this.options.chromePath);
     const configuredArgs = this.options.chromeArgs || [];
     this.proxy = await browserProxy(configuredArgs);
@@ -117,7 +143,10 @@ export class StudioBrowser {
     );
     let endpoint = "";
     for (let attempt = 0; attempt < 150; attempt++) {
-      if (this.chrome.exitCode !== null) throw new Error("Chrome exited before starting WebView");
+      if (this.chrome.exitCode !== null)
+        throw new Error(
+          `Chrome exited before starting WebView (exit ${this.chrome.exitCode}, signal ${this.chrome.signalCode ?? "none"})`,
+        );
       const file = Bun.file(portFile);
       if (await file.exists()) {
         const [port, path] = (await file.text()).trim().split("\n");
