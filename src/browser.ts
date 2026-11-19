@@ -1,4 +1,5 @@
-import { access, rm } from "node:fs/promises";
+import { access, readlink, rm } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { chromePath } from "./dependencies.ts";
 import { cancelFetch, INSTALL, launchFetch, readFetch } from "./page.ts";
@@ -18,6 +19,32 @@ export interface PageChunk {
   chunks: string[];
   done: boolean;
   error: string;
+}
+
+// Chrome's POSIX process singleton marks a profile with a symlink to
+// "<hostname>-<pid>". Treat a lock as live unless its PID is provably gone on
+// this host: malformed, remote or EPERM locks stay untouched rather than
+// risking another browser's session. Zombies keep their PID until reaped, so
+// they block startup too.
+async function liveLockOwner(profile: string): Promise<string | undefined> {
+  let target: string;
+  try {
+    target = await readlink(join(profile, "SingletonLock"));
+  } catch {
+    return;
+  }
+  const match = target.match(/^(.*)-(\d+)$/);
+  if (!match) return target;
+  const [, host, pidText] = match;
+  if (host && host !== hostname()) return target;
+  const pid = Number(pidText);
+  if (!Number.isInteger(pid) || pid <= 0) return target;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return;
+  }
+  return target;
 }
 
 export class StudioBrowser {
@@ -48,6 +75,10 @@ export class StudioBrowser {
 
   private async openBrowser(interactive: boolean): Promise<void> {
     await access(this.session.profile);
+    // Another host or browser instance may still own this profile. Leave its
+    // discovery endpoint intact instead of deleting it and spawning a second Chrome.
+    const lockOwner = await liveLockOwner(this.session.profile);
+    if (lockOwner) throw new Error(`Chrome profile is in use by ${lockOwner}; close that browser and retry`);
     const path = chromePath(this.options.chromePath);
     const configuredArgs = this.options.chromeArgs || [];
     this.proxy = await browserProxy(configuredArgs);
@@ -117,7 +148,12 @@ export class StudioBrowser {
     );
     let endpoint = "";
     for (let attempt = 0; attempt < 150; attempt++) {
-      if (this.chrome.exitCode !== null) throw new Error("Chrome exited before starting WebView");
+      // A signal-killed Chrome leaves exitCode null, so both fields must be
+      // checked before reporting a timeout.
+      if (this.chrome.exitCode !== null || this.chrome.signalCode !== null)
+        throw new Error(
+          `Chrome exited before starting WebView (exit ${this.chrome.exitCode ?? "none"}, signal ${this.chrome.signalCode ?? "none"})`,
+        );
       const file = Bun.file(portFile);
       if (await file.exists()) {
         const [port, path] = (await file.text()).trim().split("\n");
