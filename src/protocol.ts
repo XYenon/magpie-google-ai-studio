@@ -556,7 +556,7 @@ export function encodeGenerateRequest(
     const thinking: Wire = [t.includeThoughts === undefined ? 1 : boolean(t.includeThoughts) ? 1 : 0];
     if (t.thinkingBudget !== undefined)
       set(thinking, 1, number(t.thinkingBudget, "thinkingBudget", -1, Infinity, true));
-    if (t.thinkingLevel !== undefined)
+    else if (t.thinkingLevel !== undefined)
       set(
         thinking,
         3,

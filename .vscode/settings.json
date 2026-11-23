@@ -7,15 +7,8 @@
       "source.organizeImports.biome": "explicit"
     }
   },
-  "[markdown]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.formatOnSave": true,
-    "editor.codeActionsOnSave": {
-      "source.fixAll.markdownlint": "explicit"
-    }
-  },
-  "[yaml]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "[markdown][yaml]": {
+    "editor.defaultFormatter": "biomejs.biome",
     "editor.formatOnSave": true
   }
 }

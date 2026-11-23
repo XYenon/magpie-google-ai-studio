@@ -227,17 +227,23 @@ test("Playground rejects invalid generation settings before contacting Google", 
   }
 });
 
-test("Playground preserves temperature boundaries and automatic or zero thinking budgets", async () => {
-  for (const [temperature, thinkingBudget] of [
-    [0, 0],
-    [2, -1],
-  ]) {
+test("Playground preserves temperature boundaries and gives explicit thinking settings precedence", async () => {
+  const defaults: Wire = Array(72).fill(null);
+  defaults[64] = [52];
+  defaults[71] = [null, null, null, null, null, 2, [4, 2]];
+  for (const [temperature, thinkingConfig, expected] of [
+    [0, { thinkingBudget: 0 }, [1, 0]],
+    [2, { thinkingBudget: -1 }, [1, -1]],
+    [1, { thinkingBudget: 10_000 }, [1, 10_000]],
+    [1, { thinkingLevel: "minimal" }, [1, null, null, 4]],
+    [1, undefined, [1, null, null, 2]],
+  ] as const) {
     const fetch = providerFetch({
       ...transport,
       async generate(_model, encode) {
-        const config = encode([], "UTC").body[3] as Wire;
+        const config = encode(defaults, "UTC").body[3] as Wire;
         expect(config[4]).toBe(temperature);
-        expect((config[16] as Wire)[1]).toBe(thinkingBudget);
+        expect(config[16]).toEqual([...expected]);
         return new Response(root);
       },
     });
@@ -245,7 +251,7 @@ test("Playground preserves temperature boundaries and automatic or zero thinking
       method: "POST",
       body: JSON.stringify({
         ...request,
-        generationConfig: { temperature, thinkingConfig: { thinkingBudget } },
+        generationConfig: { temperature, thinkingConfig },
         toolConfig: { functionCallingConfig: { mode: "AUTO", allowedFunctionNames: [] } },
       }),
     });

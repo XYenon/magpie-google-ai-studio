@@ -101,7 +101,7 @@ magpie plugin login google-ai-studio 2
 
 ## 配置
 
-在 Magpie Web 的"设置 → 插件"中编辑选项 JSON，或修改 `plugins.json` 中本插件的 `options`。例如：
+在 Magpie Web 的"设置 → 插件 → 已安装"中，找到 `magpie-google-ai-studio`，点击"选项"并编辑 JSON。Magpie 会在已有配置或插件提供选项示例时显示这个按钮。若没有按钮，可用下方的 CLI 命令，或修改 `plugins.json` 中本插件的 `options`。
 
 ```json
 {
@@ -110,10 +110,17 @@ magpie plugin login google-ai-studio 2
 }
 ```
 
-也可通过命令行配置：
+CLI 接受完整的选项 JSON。有其他选项时，请一并传入。
 
 ```sh
 magpie plugin options magpie-google-ai-studio '{"chromePath":"/usr/bin/chromium","timeoutMs":180000}'
+```
+
+使用 Docker Compose 时，在运行 Magpie 的容器里执行命令。以下命令适用于服务名为 `magpie`、没有其他插件选项的部署。启用前请确认满足下文的独占使用条件。
+
+```sh
+docker compose exec magpie magpie plugin options magpie-google-ai-studio '{"recoverForeignProfileLock":true}'
+docker compose restart magpie
 ```
 
 ### 插件选项

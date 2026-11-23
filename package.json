@@ -1,6 +1,6 @@
 {
   "name": "magpie-google-ai-studio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Google AI Studio provider for Magpie, powered by Bun.WebView",
   "author": {
     "name": "XYenon",
@@ -29,10 +29,9 @@
   ],
   "scripts": {
     "check": "bun run lint && bun run typecheck && bun test",
-    "lint": "biome check --error-on-warnings . && prettier --check \"**/*.{md,markdown,yml,yaml}\" --ignore-path .gitignore && bun run lint:markdown",
-    "lint:markdown": "markdownlint-cli2",
-    "lint:fix": "biome check --write --error-on-warnings . && markdownlint-cli2 --fix && prettier --write \"**/*.{md,markdown,yml,yaml}\" --ignore-path .gitignore",
-    "format": "biome format --write . && prettier --write \"**/*.{md,markdown,yml,yaml}\" --ignore-path .gitignore",
+    "lint": "biome check --error-on-warnings .",
+    "lint:fix": "biome check --write --error-on-warnings .",
+    "format": "biome format --write .",
     "test": "bun test",
     "typecheck": "bun check",
     "login": "bun src/login.ts",
@@ -53,12 +52,13 @@
     "access": "public"
   },
   "magpie": {
-    "maxConcurrency": 1
+    "maxConcurrency": 1,
+    "options": {
+      "recoverForeignProfileLock": false
+    }
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.2",
-    "@types/bun": "^1.4.0",
-    "markdownlint-cli2": "^0.24.0",
-    "prettier": "^3.9.10"
+    "@biomejs/biome": "^2.6.8",
+    "@types/bun": "^1.4.0"
   }
 }
