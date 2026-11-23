@@ -69,13 +69,7 @@ export const INSTALL = `(() => {
   const timer = setInterval(() => { if (state.hook()) clearInterval(timer); }, 100);
 })()`;
 
-export function launchFetch(
-  id: string,
-  url: string,
-  body: unknown[],
-  binding?: string,
-  proofIndex = 4,
-): string {
+export function launchFetch(id: string, url: string, body: unknown[], binding?: string): string {
   return `(async () => {
     const state = window.__magpieStudio;
     const id = ${JSON.stringify(id)};
@@ -90,7 +84,7 @@ export function launchFetch(
           if (!state.service || !state.snapshotKey) throw new Error('AI Studio WAA service is not ready');
           const proof = await window.default_MakerSuite[state.snapshotKey](state.service, digest);
           if (typeof proof !== 'string' || !proof.startsWith('!')) throw new Error('AI Studio returned an invalid WAA proof');
-          body[${proofIndex}] = proof;
+          body[4] = proof;
         }
         if (req.controller.signal.aborted) return;
         const headers = {...state.headers, 'content-type': 'application/json+protobuf'};

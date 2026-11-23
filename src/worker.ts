@@ -36,9 +36,7 @@ try {
         options: Options;
         requestId: string;
         body: Wire;
-        binding: string;
-        upstreamMethod?: string;
-        proofIndex?: number;
+        binding?: string;
         interactive?: boolean;
       };
       try {
@@ -52,21 +50,12 @@ try {
           case "models":
             value = await browser!.listModels();
             break;
-          case "buildModels":
-            value = await browser!.buildModels();
-            break;
           case "snapshot":
             value = await browser!.snapshot();
             break;
-          case "generate":
-            if (command.binding !== undefined) await browser!.bootstrap();
-            await browser!.start(
-              command.requestId,
-              command.upstreamMethod || "GenerateContent",
-              command.body,
-              command.binding,
-              command.proofIndex,
-            );
+          case "GenerateContent":
+          case "CountTokens":
+            await browser!.start(command.requestId, command.method, command.body, command.binding);
             value = true;
             break;
           case "poll":

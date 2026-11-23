@@ -1,36 +1,23 @@
 import {
-  decodeBuildStream,
-  decodeBuildUnary,
-  embeddingRequests,
-  encodeBuild,
-  encodeBuildGenerate,
-  needsBuild,
-} from "./build.ts";
-import {
   aggregateGenerate,
   decodeGenerateStream,
   type EncodedRequest,
   encodeGenerateRequest,
-  parseModels,
+  type ModelCatalog,
   parseSparseJSON,
   responseError,
   type Wire,
 } from "./protocol.ts";
 
+const GEMINI_ORIGIN = "https://generativelanguage.googleapis.com";
+export const GEMINI_API = `${GEMINI_ORIGIN}/v1beta`;
+
 export interface Transport {
-  models(): Promise<Wire>;
-  buildModels?(): Promise<Record<string, unknown>[]>;
-  call?(
-    method: string,
-    body: Wire,
-    binding?: string,
-    proofIndex?: number,
-    signal?: AbortSignal,
-  ): Promise<Response>;
+  models(): Promise<ModelCatalog>;
+  countTokens(body: Wire, signal?: AbortSignal): Promise<Response>;
   generate(
     model: string,
-    request: Record<string, unknown>,
-    encode: (defaults: Wire | undefined, timezone: string) => EncodedRequest,
+    encode: (defaults: Wire, timezone: string) => EncodedRequest,
     signal?: AbortSignal,
   ): Promise<Response>;
 }
@@ -54,8 +41,14 @@ function isTimeout(error: unknown): boolean {
   return (error as { name?: unknown } | null | undefined)?.name === "TimeoutError";
 }
 
-export function errorResponse(status: number, message: string): Response {
+function errorResponse(status: number, message: string): Response {
   return Response.json(errorJson(status, message), { status });
+}
+
+function upstreamError(error: unknown, fallback: string): Response {
+  if ((error as { signIn?: string } | null)?.signIn === "expired")
+    return errorResponse(401, "Google AI Studio session expired; sign in again");
+  return errorResponse(isTimeout(error) ? 504 : 502, error instanceof Error ? error.message : fallback);
 }
 
 export function providerFetch(
@@ -64,41 +57,37 @@ export function providerFetch(
   return async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    if (
-      transport.call &&
-      /\/(embeddings|models\/[^/:]+:(embedContent|batchEmbedContents|countTokens))$/.test(url.pathname)
-    )
-      return auxiliaryFetch(transport, request);
+    const count = /\/models\/([^/:]+):countTokens$/.exec(url.pathname);
     const match = /^\/v1beta\/models\/([^/:]+):(streamGenerateContent|generateContent)$/.exec(url.pathname);
-    if (!match) return errorResponse(404, "Unsupported Google AI Studio endpoint");
-    if (request.method !== "POST") return errorResponse(405, "Use POST for content generation");
-    if (url.origin !== "https://generativelanguage.googleapis.com")
-      return errorResponse(400, "Unexpected Gemini API origin");
-    let body: Record<string, unknown>,
-      build = false;
+    if (!count && !match) return errorResponse(404, "Unsupported Google AI Studio endpoint");
+    if (request.method !== "POST")
+      return errorResponse(405, count ? "Use POST" : "Use POST for content generation");
+    if (url.origin !== GEMINI_ORIGIN) return errorResponse(400, "Unexpected Gemini API origin");
+    if (count) return countTokens(transport, request, count[1]);
+    let model: string, body: Record<string, unknown>;
     try {
+      model = decodeURIComponent(match![1]);
       body = await request.json();
-      build = Boolean(transport.call && (needsBuild(body) || /(?:^|-)tts(?:-|$)/.test(match[1])));
-      if (build)
-        encodeBuildGenerate(decodeURIComponent(match[1]), body, match[2] === "streamGenerateContent");
-      else encodeGenerateRequest(decodeURIComponent(match[1]), body);
+      encodeGenerateRequest(model, body);
     } catch (error) {
       return errorResponse(400, error instanceof Error ? error.message : "Invalid Gemini request");
     }
     const cancellation = new AbortController();
     const signal = AbortSignal.any([request.signal, cancellation.signal]);
+    let validationError: unknown;
     try {
-      const model = decodeURIComponent(match[1]);
       let continuationLimit: number | undefined;
       const response = await transport.generate(
         model,
-        body,
         (defaults, timezone) => {
-          const encoded = build
-            ? encodeBuildGenerate(model, body, match[2] === "streamGenerateContent")
-            : encodeGenerateRequest(model, body, defaults, timezone);
-          continuationLimit = encoded.continuationLimit;
-          return encoded;
+          try {
+            const encoded = encodeGenerateRequest(model, body, defaults, timezone);
+            continuationLimit = encoded.continuationLimit;
+            return encoded;
+          } catch (error) {
+            validationError = error;
+            throw error;
+          }
         },
         signal,
       );
@@ -106,34 +95,22 @@ export function providerFetch(
         return errorResponse(response.status, await responseError(response));
       }
       if (!response.body) return errorResponse(502, "AI Studio returned no response body");
-      if (build && match[2] === "generateContent") {
-        const result = await decodeBuildUnary(response);
-        if (
-          !(result.candidates as unknown[] | undefined)?.length &&
-          !(result.promptFeedback as Record<string, unknown> | undefined)?.blockReason
-        )
-          throw new Error("AI Studio returned no candidates or blocking feedback");
-        return Response.json(result);
-      }
-      const chunks = build
-        ? decodeBuildStream(response.body)
-        : decodeGenerateStream(
-            response.body,
-            continuationLimit
-              ? {
-                  limit: continuationLimit,
-                  resume: (token, round) =>
-                    transport.generate(
-                      model,
-                      body,
-                      (defaults, timezone) =>
-                        encodeGenerateRequest(model, body, defaults, timezone, round, token),
-                      signal,
-                    ),
-                }
-              : undefined,
-          );
-      if (match[2] === "generateContent") return Response.json(await aggregateGenerate(chunks));
+      const chunks = decodeGenerateStream(
+        response.body,
+        continuationLimit
+          ? {
+              limit: continuationLimit,
+              resume: (token, round) =>
+                transport.generate(
+                  model,
+                  (defaults, timezone) =>
+                    encodeGenerateRequest(model, body, defaults, timezone, round, token),
+                  signal,
+                ),
+            }
+          : undefined,
+      );
+      if (match![2] === "generateContent") return Response.json(await aggregateGenerate(chunks));
       const encoder = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         async pull(controller) {
@@ -165,144 +142,51 @@ export function providerFetch(
       });
     } catch (error) {
       if (request.signal.aborted) throw request.signal.reason;
-      if ((error as { signIn?: string }).signIn === "expired")
-        return errorResponse(401, "Google AI Studio session expired; sign in again");
-      return errorResponse(
-        isTimeout(error) ? 504 : 502,
-        error instanceof Error ? error.message : "AI Studio request failed",
-      );
+      if (validationError instanceof Error) return errorResponse(400, validationError.message);
+      return upstreamError(error, "AI Studio request failed");
     }
   };
 }
 
-export async function providerModels(transport: Transport): Promise<Record<string, Record<string, unknown>>> {
-  const models = parseModels(await transport.models());
-  // Temporarily list only text conversation models, without Build embeddings,
-  // until Magpie supports model purposes: https://github.com/yetone/magpie/issues/3279
+export async function providerModels(transport: Transport) {
+  const models = await transport.models();
   return Object.fromEntries(
-    Object.entries(models)
-      .filter(([, model]) => {
-        const { output } = model.modalities as { output: string[] };
-        return output.length === 1 && output[0] === "text";
-      })
-      .map(([id, model]) => [
-        id,
-        {
-          ...model,
-          api: {
-            id,
-            npm: "@ai-sdk/google",
-            url: "https://generativelanguage.googleapis.com/v1beta",
-          },
+    Object.entries(models).map(([id, { defaults: _, ...model }]) => [
+      id,
+      {
+        ...model,
+        api: {
+          id,
+          npm: "@ai-sdk/google",
+          url: GEMINI_API,
         },
-      ]),
+      },
+    ]),
   );
 }
 
-async function auxiliaryFetch(transport: Transport, request: Request): Promise<Response> {
-  if (request.method !== "POST") return errorResponse(405, "Use POST");
-  if (new URL(request.url).origin !== "https://generativelanguage.googleapis.com")
-    return errorResponse(400, "Unexpected Gemini API origin");
-  let upstream = false;
+async function countTokens(transport: Transport, request: Request, model: string): Promise<Response> {
+  let body: Wire;
   try {
     const data = (await request.json()) as Record<string, unknown>;
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Expected a JSON object");
-    const path = new URL(request.url).pathname;
-    const native = /\/models\/([^/:]+):(embedContent|batchEmbedContents|countTokens)$/.exec(path);
-    if (native?.[2] === "countTokens") {
-      const input = data.generateContentRequest ?? data;
-      if (!input || typeof input !== "object" || Array.isArray(input))
-        throw new Error("Invalid generateContentRequest");
-      const { model: _, ...content } = input as Record<string, unknown>;
-      const encoded = encodeGenerateRequest(native[1], content);
-      upstream = true;
-      const response = await transport.call!(
-        "CountTokens",
-        [`models/${native[1]}`, null, encoded.body],
-        undefined,
-        4,
-        request.signal,
-      );
-      if (!response.ok) {
-        return errorResponse(response.status, await responseError(response));
-      }
-      const value = parseSparseJSON(await response.text()) as Wire;
-      if (typeof value[0] !== "number") throw new Error("Invalid CountTokens response");
-      return Response.json({ totalTokens: value[0] });
-    }
-    const model = native?.[1] || String(data.model || "").replace(/^models\//, "");
-    let inputs: unknown;
-    if (native) inputs = native[2] === "embedContent" ? [data] : data.requests;
-    else inputs = embeddingRequests(model, data);
-    if (!Array.isArray(inputs) || !inputs.length || !/^[\w.-]+$/.test(model))
-      throw new Error("Invalid embedding requests");
-    const vectors: number[][] = [];
-    let tokens = 0;
-    for (let offset = 0; offset < inputs.length; offset += 100) {
-      const batch = inputs.slice(offset, offset + 100).map((item) => ({ ...item, model: `models/${model}` }));
-      const encoded = encodeBuild(`/v1beta/models/${model}:batchEmbedContents`, { requests: batch });
-      upstream = true;
-      const response = await transport.call!(
-        encoded.upstreamMethod!,
-        encoded.body,
-        encoded.binding,
-        encoded.proofIndex,
-        request.signal,
-      );
-      if (!response.ok) {
-        return errorResponse(response.status, await responseError(response));
-      }
-      const result = await decodeBuildUnary(response);
-      const embeddings = result.embeddings as { values: number[] }[];
-      if (
-        !Array.isArray(embeddings) ||
-        embeddings.length !== batch.length ||
-        embeddings.some(
-          (e) =>
-            !Array.isArray(e.values) ||
-            !e.values.length ||
-            e.values.some((v) => typeof v !== "number" || !Number.isFinite(v)),
-        )
-      )
-        throw new Error("Invalid embedding response");
-      vectors.push(...embeddings.map((e) => e.values));
-      tokens += Number(result.tokenCount || 0);
-    }
-    if (native)
-      return Response.json(
-        native[2] === "embedContent"
-          ? { embedding: { values: vectors[0] } }
-          : {
-              embeddings: vectors.map((values) => ({ values })),
-              tokenCount: tokens,
-            },
-      );
-    return Response.json({
-      object: "list",
-      model,
-      data: vectors.map((values, index) => {
-        const bytes = Buffer.alloc(values.length * 4);
-        if (data.encoding_format === "base64")
-          values.forEach((v, i) => {
-            bytes.writeFloatLE(v, i * 4);
-          });
-        return {
-          object: "embedding",
-          index,
-          embedding: data.encoding_format === "base64" ? bytes.toString("base64") : values,
-        };
-      }),
-      usage: { prompt_tokens: tokens, total_tokens: tokens },
-    });
+    const input = data.generateContentRequest ?? data;
+    if (!input || typeof input !== "object" || Array.isArray(input))
+      throw new Error("Invalid generateContentRequest");
+    const { model: _, ...content } = input as Record<string, unknown>;
+    body = [`models/${model}`, null, encodeGenerateRequest(model, content).body];
   } catch (error) {
     if (request.signal.aborted) throw request.signal.reason;
-    if ((error as { signIn?: string }).signIn === "expired")
-      return errorResponse(401, "Google AI Studio session expired; sign in again");
-    let status = upstream ? 502 : 400;
-    if (isTimeout(error)) status = 504;
-    return errorResponse(
-      status,
-      error instanceof Error ? error.message : "AI Studio auxiliary request failed",
-    );
+    return errorResponse(400, error instanceof Error ? error.message : "Invalid token count request");
+  }
+  try {
+    const response = await transport.countTokens(body, request.signal);
+    if (!response.ok) return errorResponse(response.status, await responseError(response));
+    const value = parseSparseJSON(await response.text()) as Wire;
+    if (typeof value[0] !== "number") throw new Error("Invalid CountTokens response");
+    return Response.json({ totalTokens: value[0] });
+  } catch (error) {
+    if (request.signal.aborted) throw request.signal.reason;
+    return upstreamError(error, "AI Studio token count request failed");
   }
 }

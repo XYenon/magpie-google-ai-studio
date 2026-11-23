@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { chromePath } from "./dependencies.ts";
 import { cancelFetch, INSTALL, launchFetch, readFetch } from "./page.ts";
-import { parseModels, parseSparseJSON, responseError, type Wire } from "./protocol.ts";
+import { type ModelCatalog, parseModels, parseSparseJSON, responseError, type Wire } from "./protocol.ts";
 import { browserProxy } from "./proxy.ts";
 import { type Options, type Session, type StorageState, storageState } from "./session.ts";
 
@@ -49,8 +49,8 @@ async function liveLockOwner(profile: string): Promise<string | undefined> {
 
 export class StudioBrowser {
   view!: Bun.WebView;
-  catalog?: Wire;
   timezone = "UTC";
+  private catalog?: ModelCatalog;
   private chrome?: ReturnType<typeof Bun.spawn>;
   private headers: Record<string, string> = {};
   private bootstrapped = false;
@@ -281,44 +281,11 @@ export class StudioBrowser {
     );
   }
 
-  async listModels(): Promise<Wire> {
-    await this.syncHeaders();
-    const response = await this.request("ListModels", []);
-    const value = parseSparseJSON(await response.text());
-    parseModels(value);
-    this.catalog = value as Wire;
-    return this.catalog;
-  }
-
-  async buildModels(): Promise<Record<string, unknown>[]> {
-    const models: Record<string, unknown>[] = [];
-    let pageToken: unknown;
-    for (let page = 0; page < 10; page++) {
-      const response = await this.request("ProxyUnaryCall", [
-        "/v1beta/models",
-        JSON.stringify({
-          pageSize: "200",
-          ...(pageToken ? { pageToken } : {}),
-        }),
-        null,
-        "GET",
-      ]);
-      const wire = parseSparseJSON(await response.text()) as Wire;
-      const data = JSON.parse(String(wire[0]));
-      if (!Array.isArray(data.models)) throw new Error("Invalid Build model catalog");
-      models.push(...data.models);
-      pageToken = data.nextPageToken;
-      if (!pageToken) return models;
-    }
-    throw new Error("Build model catalog pagination exceeded ten pages");
-  }
-
-  async bootstrap(): Promise<void> {
+  private async bootstrap(): Promise<void> {
     if (this.bootstrapped) return;
-    const catalog = this.catalog || (await this.listModels());
-    const ids = Object.keys(parseModels(catalog));
-    const model = this.options.bootstrapModel || ids[0];
-    if (!ids.includes(model))
+    const catalog = this.catalog ?? (await this.listModels());
+    const model = this.options.bootstrapModel || Object.keys(catalog)[0];
+    if (!Object.hasOwn(catalog, model))
       throw new Error("bootstrapModel is not available in this account's GenerateContent catalog");
     await this.view.navigate(`${ORIGIN}/prompts/new_chat?model=${encodeURIComponent(model)}&temporary=true`);
     await this.wait("Boolean(window.__magpieStudio?.hook())", 30_000);
@@ -356,8 +323,14 @@ export class StudioBrowser {
     this.bootstrapped = true;
   }
 
-  async start(id: string, method: string, body: Wire, binding?: string, proofIndex = 4): Promise<void> {
-    await this.view.evaluate(launchFetch(id, RPC + method, body, binding, proofIndex));
+  async start(
+    id: string,
+    method: "GenerateContent" | "CountTokens" | "ListModels",
+    body: Wire,
+    binding?: string,
+  ): Promise<void> {
+    if (method === "GenerateContent") await this.bootstrap();
+    await this.view.evaluate(launchFetch(id, RPC + method, body, binding));
   }
 
   async poll(id: string): Promise<PageChunk> {
@@ -368,9 +341,10 @@ export class StudioBrowser {
     await this.view.evaluate(cancelFetch(id));
   }
 
-  private async request(method: string, body: Wire): Promise<Response> {
+  async listModels(): Promise<ModelCatalog> {
+    await this.syncHeaders();
     const id = crypto.randomUUID();
-    await this.start(id, method, body);
+    await this.start(id, "ListModels", []);
     const chunks: Uint8Array[] = [];
     const end = Date.now() + (this.options.timeoutMs || 120_000);
     try {
@@ -385,13 +359,13 @@ export class StudioBrowser {
             });
           if (result.status < 200 || result.status >= 300)
             throw new Error(
-              `AI Studio ${method}: ${await responseError(new Response(Buffer.concat(chunks), { status: result.status }))}`,
+              `AI Studio ListModels: ${await responseError(new Response(Buffer.concat(chunks), { status: result.status }))}`,
             );
-          return new Response(Buffer.concat(chunks));
+          return (this.catalog = parseModels(new TextDecoder().decode(Buffer.concat(chunks))));
         }
         await Bun.sleep(25);
       }
-      throw new Error(`AI Studio ${method} timed out`);
+      throw new Error("AI Studio ListModels timed out");
     } finally {
       await this.cancel(id);
     }

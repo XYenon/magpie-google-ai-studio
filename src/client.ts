@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { PageChunk } from "./browser.ts";
 import { prepareBrowser } from "./dependencies.ts";
-import type { EncodedRequest, Wire } from "./protocol.ts";
+import type { EncodedRequest, ModelCatalog, Wire } from "./protocol.ts";
 import {
   exportSession,
   exportSessionText,
@@ -16,7 +16,7 @@ export class StudioClient {
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private queue: Promise<void> = Promise.resolve();
   private idle?: ReturnType<typeof setTimeout>;
-  private catalog?: Wire;
+  private catalog?: ModelCatalog;
   private closing: Promise<unknown> = Promise.resolve();
   private proxy?: string;
   timezone = "UTC";
@@ -163,35 +163,36 @@ export class StudioClient {
     }
   }
 
-  async models(): Promise<Wire> {
+  async models(): Promise<ModelCatalog> {
     const release = await this.lock();
     try {
       await this.open();
-      this.catalog = await this.rpc<Wire>("models");
-      return this.catalog;
+      return (this.catalog = await this.rpc<ModelCatalog>("models"));
     } finally {
       release();
     }
   }
 
-  async buildModels(): Promise<Record<string, unknown>[]> {
-    const release = await this.lock();
-    try {
-      await this.open();
-      return await this.rpc("buildModels");
-    } finally {
-      release();
-    }
-  }
-
-  async call(
-    method: string,
-    body: Wire,
-    binding?: string,
-    proofIndex = 4,
+  generate(
+    model: string,
+    encode: (defaults: Wire, timezone: string) => EncodedRequest,
     signal?: AbortSignal,
   ): Promise<Response> {
-    return this.generate("", {}, () => ({ upstreamMethod: method, body, binding, proofIndex }), signal);
+    return this.request(
+      "GenerateContent",
+      async () => {
+        const catalog = (this.catalog ??= await this.rpc<ModelCatalog>("models"));
+        if (!Object.hasOwn(catalog, model))
+          throw new Error(`Model ${model} is not available for generation in this Google AI Studio account`);
+        const { body, binding } = encode(catalog[model].defaults, this.timezone);
+        return { body, binding };
+      },
+      signal,
+    );
+  }
+
+  countTokens(body: Wire, signal?: AbortSignal): Promise<Response> {
+    return this.request("CountTokens", () => ({ body }), signal);
   }
 
   async export(path?: string): Promise<string> {
@@ -210,10 +211,9 @@ export class StudioClient {
 
   // The lease lasts until the response is consumed or cancelled. This also
   // serializes WebView evaluate calls when Magpie raises account concurrency.
-  async generate(
-    model: string,
-    _request: Record<string, unknown>,
-    encode: (defaults: Wire | undefined, timezone: string) => EncodedRequest,
+  private async request(
+    method: "GenerateContent" | "CountTokens",
+    prepare: () => { body: Wire; binding?: string } | Promise<{ body: Wire; binding?: string }>,
     signal?: AbortSignal,
   ): Promise<Response> {
     const release = await this.lock(signal);
@@ -257,13 +257,9 @@ export class StudioClient {
       abort.throwIfAborted();
       await this.open(false, abort);
       abort.throwIfAborted();
-      if (model) this.catalog ||= await this.rpc<Wire>("models");
-      const rows = (this.catalog?.[0] || []) as Wire[];
-      const defaults = rows.find((row) => row[0] === `models/${model}`);
-      if (model && !defaults)
-        throw new Error(`Model ${model} is not available in this Google AI Studio account`);
-      const encoded = encode(defaults, this.timezone);
-      await this.rpc("generate", { requestId: id, ...encoded });
+      const payload = await prepare();
+      abort.throwIfAborted();
+      await this.rpc(method, { requestId: id, ...payload });
       let head: PageChunk;
       for (;;) {
         abort.throwIfAborted();
@@ -276,20 +272,14 @@ export class StudioClient {
         }
         await Bun.sleep(25);
       }
-      let buffered = head;
+      let buffered: PageChunk | undefined = head;
       const stream = new ReadableStream<Uint8Array>({
         pull: async (controller) => {
           try {
             while (!finished) {
               abort.throwIfAborted();
-              const result = buffered;
-              buffered = {
-                status: 0,
-                headers: [],
-                chunks: [],
-                done: false,
-                error: "",
-              };
+              const result = buffered ?? (await this.rpc<PageChunk>("poll", { requestId: id }));
+              buffered = undefined;
               if (result.error) throw new Error("AI Studio response stream interrupted");
               const chunks = result.chunks;
               if (chunks.length) resetTimeout();
@@ -301,8 +291,6 @@ export class StudioClient {
               }
               if (chunks.length) return;
               await Bun.sleep(25);
-              abort.throwIfAborted();
-              buffered = await this.rpc<PageChunk>("poll", { requestId: id });
             }
             abort.throwIfAborted();
           } catch (error) {

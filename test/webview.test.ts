@@ -324,6 +324,9 @@ test.skipIf(!enabled)(
           return new Response("unauthenticated fixture", { status: 403, headers });
         headers.set("content-type", "application/json+protobuf");
         if (rejectRequests) return new Response(rejectionBody, { status: 400, headers });
+        if (url.pathname.endsWith("/CountTokens")) return new Response("[17]", { headers });
+        if (!url.pathname.endsWith("/ListModels") && !url.pathname.endsWith("/GenerateContent"))
+          return new Response("Unexpected fixture request", { status: 404, headers });
         const content = [[[null, "OK"]], "model"];
         const frame = [[[content, 1, 0]], null, [6, 1, 7]];
         const model = [...row];
@@ -404,7 +407,7 @@ test.skipIf(!enabled)(
       process.env.MAGPIE_AISTUDIO_DATA_DIR = join(root, "source");
       const source = await createSession("fixture-account");
       const from = clientFor(source);
-      expect(((await from.models())[0] as Wire[])[0][3]).toBe("proxy-a");
+      expect((await from.models()).fixture.name).toBe("proxy-a");
       const portable = await from.export(join(root, "portable.aistudio.json"));
       const text = await from.export();
       const exported = await Bun.file(portable).json();
@@ -424,7 +427,7 @@ test.skipIf(!enabled)(
       const destination = await importSessionText(text);
       const to = clientFor(destination);
       row[3] = "proxy-b";
-      expect((await to.models())[0]).toEqual([row]);
+      expect((await to.models()).fixture).toMatchObject({ name: "proxy-b", defaults: row });
       // Let Chrome's asynchronous account consistency task finish before
       // verifying that the imported session still authorizes requests.
       await Bun.sleep(1000);
@@ -433,14 +436,14 @@ test.skipIf(!enabled)(
         (await Bun.file(join(root, "second-export.aistudio.json")).json()).origins[0].sessionStorage,
       ).toContainEqual({ name: "context", value: "portable" });
       process.env.HTTPS_PROXY = first.url;
-      expect(((await to.models())[0] as Wire[])[0][3]).toBe("proxy-a");
+      expect((await to.models()).fixture.name).toBe("proxy-a");
       process.env.NO_PROXY = ".google.com,.clients6.google.com";
-      expect(((await to.models())[0] as Wire[])[0][3]).toBe("direct");
+      expect((await to.models()).fixture.name).toBe("direct");
       delete process.env.HTTP_PROXY;
       delete process.env.HTTPS_PROXY;
       delete process.env.NO_PROXY;
       process.env.MAGPIE_HTTPS_PROXY = first.url;
-      expect(((await to.models())[0] as Wire[])[0][3]).toBe("direct");
+      expect((await to.models()).fixture.name).toBe("direct");
       await to.close();
       process.env.HTTPS_PROXY = authenticatedURL.href;
       const manual = new StudioClient(destination, {
@@ -448,9 +451,17 @@ test.skipIf(!enabled)(
         chromeArgs: [...options.chromeArgs, `--proxy-server=${first.url}`],
       });
       clients.push(manual);
-      expect(((await manual.models())[0] as Wire[])[0][3]).toBe("proxy-a");
+      expect((await manual.models()).fixture.name).toBe("proxy-a");
       await manual.close();
       const restarted = clientFor(destination);
+      const count = await providerFetch(restarted)(
+        "https://generativelanguage.googleapis.com/v1beta/models/fixture:countTokens",
+        { method: "POST", body: JSON.stringify({ contents: [{ parts: [{ text: "Count this" }] }] }) },
+      );
+      expect({ status: count.status, body: await count.json() }).toEqual({
+        status: 200,
+        body: { totalTokens: 17 },
+      });
       const response = await providerFetch(restarted)(
         "https://generativelanguage.googleapis.com/v1beta/models/fixture:generateContent",
         {
@@ -474,7 +485,6 @@ test.skipIf(!enabled)(
         status: 400,
         body: { error: { message: `Google AI Studio returned HTTP 400: ${rejectionBody}` } },
       });
-      await expect(restarted.buildModels()).rejects.toThrow(`HTTP 400: ${rejectionBody}`);
     } finally {
       for (const client of clients) await client.close();
       if (previous === undefined) delete process.env.MAGPIE_AISTUDIO_DATA_DIR;

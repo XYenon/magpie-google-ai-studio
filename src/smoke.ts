@@ -1,5 +1,5 @@
 import { StudioClient } from "./client.ts";
-import { providerFetch, providerModels } from "./provider.ts";
+import { GEMINI_API, providerFetch } from "./provider.ts";
 import { importSession } from "./session.ts";
 
 if (process.argv.includes("--help") || !process.argv[2]) {
@@ -9,11 +9,17 @@ if (process.argv.includes("--help") || !process.argv[2]) {
 } else {
   const client = new StudioClient(await importSession(process.argv[2]));
   try {
-    const models = await providerModels(client);
+    const models = await client.models();
     console.error(`Found ${Object.keys(models).length} account models`);
-    const model = process.argv[3] || Object.keys(models)[0];
+    const model =
+      process.argv[3] ||
+      Object.keys(models).find((id) => {
+        const { output } = models[id].modalities;
+        return output.length === 1 && output[0] === "text";
+      });
+    if (!model) throw new Error("No text conversation model is available for the smoke test");
     const response = await providerFetch(client)(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      `${GEMINI_API}/models/${model}:streamGenerateContent?alt=sse`,
       {
         method: "POST",
         body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "Reply with exactly: OK" }] }] }),

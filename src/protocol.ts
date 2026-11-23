@@ -3,9 +3,7 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 export type Wire = Json[];
 export interface EncodedRequest {
   body: Wire;
-  binding?: string;
-  upstreamMethod?: string;
-  proofIndex?: number;
+  binding: string;
   continuationLimit?: number;
 }
 type ObjectValue = Record<string, unknown>;
@@ -338,6 +336,7 @@ function encodePart(value: unknown): { wire: Wire; binding: string } {
       "executableCode",
       "codeExecutionResult",
     ];
+  if (!Object.keys(part).length) fail("part cannot be empty");
   keys(part, [...variants, "thought", "thoughtSignature"], "part");
   const active = variants.filter((key) => part[key] !== undefined);
   if (active.length > 1 || (active.length === 0 && part.thoughtSignature === undefined))
@@ -455,32 +454,6 @@ const thresholds = {
   OFF: 5,
 };
 
-/** Checks shared by the Playground encoder and the native Build proxy. */
-export function validateGenerateRequest(request: ObjectValue): void {
-  const config = object(request.generationConfig ?? {}, "generationConfig");
-  if (config.temperature != null) {
-    const temperature = number(config.temperature, "temperature");
-    if (temperature < 0 || temperature > 2) fail("temperature must be between 0 and 2");
-  }
-  if (config.thinkingConfig !== undefined) {
-    const thinking = object(config.thinkingConfig, "thinkingConfig");
-    if (thinking.thinkingBudget !== undefined && thinking.thinkingLevel !== undefined)
-      fail("thinkingBudget and thinkingLevel are mutually exclusive");
-  }
-  if (request.toolConfig !== undefined) {
-    const tool = object(request.toolConfig, "toolConfig");
-    if (tool.functionCallingConfig !== undefined) {
-      const calling = object(tool.functionCallingConfig, "functionCallingConfig");
-      if (
-        calling.allowedFunctionNames !== undefined &&
-        strings(calling.allowedFunctionNames, "allowedFunctionNames").length > 0 &&
-        calling.mode !== "ANY"
-      )
-        fail("allowedFunctionNames requires mode ANY");
-    }
-  }
-}
-
 /** defaults is the original ListModels row. The browser supplies a fresh WAA slot. */
 export function encodeGenerateRequest(
   model: string,
@@ -489,13 +462,12 @@ export function encodeGenerateRequest(
   timezone?: string,
   continuationRound = 0,
   continuationToken?: string,
-): EncodedRequest & { binding: string } {
+): EncodedRequest {
   keys(
     request,
     ["contents", "systemInstruction", "tools", "toolConfig", "generationConfig", "safetySettings"],
     "request",
   );
-  validateGenerateRequest(request);
   if (!/^(models\/)?[\w.-]+$/.test(model)) fail("invalid model ID");
   const contents = array(request.contents, "contents").map((c) => encodeContent(c));
   if (!contents.length) fail("contents cannot be empty");
@@ -577,8 +549,10 @@ export function encodeGenerateRequest(
   }
   const caps = defaults[64] == null ? [] : array(defaults[64]);
   if (config.thinkingConfig !== undefined || caps.some((c) => c === 25 || c === 35 || c === 52)) {
-    const t = object(config.thinkingConfig ?? {});
+    const t = object(config.thinkingConfig === undefined ? {} : config.thinkingConfig, "thinkingConfig");
     keys(t, ["thinkingBudget", "thinkingLevel", "includeThoughts"], "thinkingConfig");
+    if (t.thinkingBudget !== undefined && t.thinkingLevel !== undefined)
+      fail("thinkingBudget and thinkingLevel are mutually exclusive");
     const thinking: Wire = [t.includeThoughts === undefined ? 1 : boolean(t.includeThoughts) ? 1 : 0];
     if (t.thinkingBudget !== undefined)
       set(thinking, 1, number(t.thinkingBudget, "thinkingBudget", -1, Infinity, true));
@@ -652,8 +626,14 @@ export function encodeGenerateRequest(
   if (request.toolConfig !== undefined) {
     const t = object(request.toolConfig);
     keys(t, ["functionCallingConfig"], "toolConfig");
-    const f = object(t.functionCallingConfig);
-    keys(f, ["mode"], "functionCallingConfig");
+    const f = object(t.functionCallingConfig, "functionCallingConfig");
+    keys(f, ["mode", "allowedFunctionNames"], "functionCallingConfig");
+    if (
+      f.allowedFunctionNames !== undefined &&
+      strings(f.allowedFunctionNames, "allowedFunctionNames").length > 0 &&
+      f.mode !== "ANY"
+    )
+      fail("allowedFunctionNames requires mode ANY");
     // No verified private slot for required/validated tool choice exists.
     if (f.mode === "NONE") {
       for (let n = tools.length - 1; n >= 0; n--)
@@ -675,15 +655,24 @@ export function encodeGenerateRequest(
   };
 }
 
-/** Only verified chat GenerateContent routes are listed, not other MakerSuite APIs. */
-export function parseModels(response: unknown): Record<string, Record<string, unknown>> {
+export type ModelCatalog = Record<
+  string,
+  Record<string, unknown> & {
+    name: string;
+    modalities: { input: string[]; output: string[] };
+    defaults: Wire;
+  }
+>;
+
+/** Keep generation defaults with the metadata for each supported Playground model. */
+export function parseModels(response: unknown): ModelCatalog {
   const root = array(
       typeof response === "string" ? parseSparseJSON(response) : response,
       "ListModels response",
     ),
     rows = array(root[0], "ListModels rows");
-  const models: Record<string, Record<string, unknown>> = Object.create(null),
-    seen = new Set<string>();
+  const models: ModelCatalog = Object.create(null);
+  const seen = new Set<string>();
   for (const value of rows) {
     const row = array(value, "model row"),
       id = string(row[0], "model ID").replace(/^models\//, ""),
@@ -696,7 +685,7 @@ export function parseModels(response: unknown): Record<string, Record<string, un
     if (
       !methods.includes("generateContent") ||
       row[78] != null ||
-      codes.some((c) => [20, 26, 46, 53, 59].includes(c))
+      codes.some((c) => [20, 26, 37, 46, 53, 59].includes(c))
     )
       continue;
     const context = number(row[5], "input token limit", 1, Infinity, true),
@@ -715,11 +704,10 @@ export function parseModels(response: unknown): Record<string, Record<string, un
           };
       }
     }
-    // Standard Gemini chat models accept the four tested media types through
-    // Build. Image-generation and speech models have narrower input contracts.
-    const speech = codes.includes(37),
-      image = codes.includes(21);
-    const multimodal = id.startsWith("gemini-") && codes.includes(1) && !image && !speech;
+    // Standard Gemini chat models advertise multimodal input. Image-generation
+    // models have a narrower input contract.
+    const image = codes.includes(21);
+    const multimodal = id.startsWith("gemini-") && codes.includes(1) && !image;
     const input = {
       text: true,
       image: multimodal || image,
@@ -728,9 +716,9 @@ export function parseModels(response: unknown): Record<string, Record<string, un
       pdf: multimodal,
     };
     const outputModalities = {
-      text: !speech,
+      text: true,
       image,
-      audio: speech,
+      audio: false,
       video: false,
       pdf: false,
     };
@@ -752,6 +740,7 @@ export function parseModels(response: unknown): Record<string, Record<string, un
         ),
       },
       variants,
+      defaults: row as Wire,
     };
   }
   if (!Object.keys(models).length)
@@ -985,7 +974,7 @@ function decodeFrame(value: unknown, seen: Set<number>, finished: Set<number>): 
 }
 
 /** Yield each complete root[0] message without waiting for the JSON root to end. */
-export async function* decodeRPCStream(source: ReadableStream<Uint8Array>): AsyncGenerator<Wire> {
+async function* decodeRPCStream(source: ReadableStream<Uint8Array>): AsyncGenerator<Wire> {
   const reader = source.getReader(),
     decoder = new TextDecoder("utf-8", { fatal: true });
   let state: "root" | "list" | "item" | "frame" | "separator" | "tail" | "error" = "root";

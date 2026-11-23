@@ -250,7 +250,7 @@ test("function args preserve every Struct type, IDs, special keys, and thought s
   expect(Object.hasOwn({} as Record<string, unknown>, "nested")).toBe(false);
 });
 
-test("model listing uses account limits and excludes non-GenerateContent routes", () => {
+test("model listing uses account limits and omits unsupported generation routes", () => {
   const model = (id: string, caps: number[], methods = ["generateContent"]) => {
     const row: Wire = Array(72).fill(null);
     row[0] = `models/${id}`;
@@ -271,7 +271,7 @@ test("model listing uses account limits and excludes non-GenerateContent routes"
       model("speech", [37]),
     ],
   ]);
-  expect(Object.keys(models)).toEqual(["chat", "gemini-fixture", "speech"]);
+  expect(Object.keys(models)).toEqual(["chat", "gemini-fixture"]);
   expect(models.chat.limit).toEqual({ context: 131072, output: 8192 });
   expect(models.chat.variants).toEqual({
     low: { thinkingConfig: { thinkingLevel: "LOW" } },
@@ -289,10 +289,6 @@ test("model listing uses account limits and excludes non-GenerateContent routes"
   expect(models["gemini-fixture"].limit).toEqual({
     context: 131072,
     output: 131072,
-  });
-  expect(models.speech.modalities).toEqual({
-    input: ["text"],
-    output: ["audio"],
   });
 });
 

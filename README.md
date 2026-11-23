@@ -1,8 +1,8 @@
 # magpie-google-ai-studio
 
-为 [Magpie](https://github.com/yetone/magpie) 接入 Google AI Studio 网页账号，将 Gemini JSON 和 SSE 请求转换为 AI Studio Playground 和 Build 的私有接口请求。
+为 [Magpie](https://github.com/yetone/magpie) 接入 Google AI Studio 网页账号，通过 AI Studio Playground 提供 Gemini JSON 和 SSE 接口。
 
-插件使用 `Bun.WebView`，不需要 Go、Python、Playwright、Puppeteer 或独立 API 服务。
+插件使用 `Bun.WebView` 和 Chromium 浏览器。
 
 ## 安装
 
@@ -149,37 +149,28 @@ magpie plugin options magpie-google-ai-studio '{"chromePath":"/usr/bin/chromium"
 ## 请求流程
 
 1. Magpie 把客户端请求转换为 Gemini 格式，调用插件的 `fetch`。
-2. 普通聊天使用 Playground 的 MakerSuite 协议，工具、Schema、媒体和语音请求使用 AI Studio Build 的原生 Gemini JSON 转发。两种路径都由账号对应的 WebView 取得新的 WAA 证明。
+2. 插件将生成请求编码为 Playground 格式，由账号对应的 WebView 取得新的 WAA 证明。
 3. WebView 在 AI Studio 页面内发送带 cookies 的原生 `fetch`，按需读取响应。
-4. 插件返回 Gemini JSON 或 SSE。Build 路径保留原生响应中的工具结果、思考签名、引用来源和用量信息。
+4. 插件解码 Playground 的响应，返回 Gemini JSON 或 SSE。
 
 初始化时，插件会在临时聊天中填写一条初始化消息，并拦截提交请求，取得页面动态请求头和 WAA 服务。该初始化请求在页面内被阻止，不发送到生成接口。实际请求重新生成 WAA 证明及 SAPISID 签名。
 
-交互登录期间不连接浏览器调试接口，关闭登录窗口后才通过 WebView 验证会话。插件禁用 Chrome 自身的账号登录，避免恢复的网页 Cookie 因缺少浏览器 OAuth 令牌而被清除，并等待 Chrome 退出后再读取会话存储。
-
-AI Studio 会拒绝 Bun 默认无头 Chrome 的部分浏览器标记，即使账号已登录、模型列表可读取，生成接口仍可能返回 403。插件启动 Chrome 时关闭 `AutomationControlled` 标记，并从浏览器实际 User-Agent 中移除 `HeadlessChrome` 前缀，保留真实平台和版本，不固定伪造某个 Chrome 版本。
-
 ## 支持的功能
 
-模型列表来自当前账号的 Playground 目录，暂时只列出输出为文本的会话模型。图片生成、TTS 和 embedding 模型暂不列出，等待 Magpie 支持模型用途分类，见 [magpie#3279](https://github.com/yetone/magpie/issues/3279)。底层调用接口仍保留下表中的功能。插件根据模型系列及目录能力声明输入输出类型，不使用固定的模型清单。每个模型能接受的工具、Schema 和媒体仍由 Google 服务端决定。
+插件从当前账号的 Playground 目录读取模型、能力和限额。目录中只公开插件支持的生成模型。
 
-普通文本对话使用 Playground 路径。包含工具或工具配置、结构化输出、媒体输入，以及语音等配置的请求使用 Build 代理路径。模型出现在 Playground 目录中，不代表同一账号在 Build 路径上也有权限或配额。实测中，同一账号的 `gemini-4-argon` 在 Playground 成功，Build 流式请求返回 403，非流式请求返回配额上限为 0 的 429。插件保留这些上游错误，不自动切换路径或重试生成。
+插件在发送前检查 `temperature` 是否在 0 到 2 之间，并拒绝同时设置 `thinkingBudget` 和 `thinkingLevel` 的请求。可用的思考级别由模型目录提供，请求中的级别名称接受大小写输入。
 
-两条路径都会在发送前检查 `temperature` 是否在 0 到 2 之间，以及 `thinkingBudget`、`thinkingLevel` 是否同时出现。非空的 `allowedFunctionNames` 必须搭配 `ANY`，插件不会把 `AUTO` 自动改成强制调用工具的 `ANY`。校验针对插件实际收到的请求，Magpie 可能已在转换时移除冲突的思考预算或工具白名单。思考级别按模型目录提供可用档位，并在请求编码时接受大小写输入。
-
-插件目前不提供剩余额度查询。官网存在 `GetModelQuota` 接口，但当前账号查询 `gemini-3.8-flash`、`gemini-4-argon` 均返回空结果，不能据此判断额度为 0 或无限。官网代码用该接口显示 Veo 的剩余生成次数，但当前账号查询相应 Veo 模型返回 404。`ListQuotaModels` 返回模型分类而非剩余数值，生成响应中的 `usageMetadata` 也仅表示本次消耗。AIStudio2API 根据 429 错误及重试时间判断冷却，未实现剩余额度查询。
-
-| 功能                       | 接口和行为                                                                                                                                                                               |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 对话生成                   | `generateContent`、`streamGenerateContent`，支持系统指令、思考配置和签名回传。流中断会报错，不补造成功的完成帧。                                                                         |
-| 函数调用                   | 支持 `AUTO`、`NONE`、`ANY`、`VALIDATED` 和 `allowedFunctionNames`，工具参数通过 `parameters` 或 `parametersJsonSchema` 原样交给服务端。`NONE` 会移除用户函数声明。                       |
-| 结构化输出                 | 支持 `responseSchema` 和 `responseJsonSchema`。后者转换为网页接受的原生 `responseFormat`，保留 `$defs`、`$ref`、`additionalProperties` 和数值限制，交给服务端处理。                      |
-| 图片、音频、视频、PDF 输入 | Gemini 聊天模型支持 `inlineData`，Magpie 的模型能力中也声明对应输入类型。`fileData` 会原样传递，但插件不替客户端上传文件或赋予远端文件访问权限。                                         |
-| 图片和语音生成             | 使用账号可用的图片模型或 TTS 模型，通过 `responseModalities`、`speechConfig` 配置，返回原生 `inlineData`。                                                                               |
-| 内置工具                   | 支持透传 `codeExecution`、`googleSearch`、`urlContext`、`googleMaps`，保留执行结果和引用元数据。可用性取决于模型。                                                                       |
-| Embeddings                 | 支持 Magpie 的 OpenAI 格式 `/v1/embeddings`，以及插件内部的 Gemini `embedContent`、`batchEmbedContents`。支持批量、`dimensions`、`float` 和 `base64`，每批最多 100 条并保持输入顺序。    |
-| Token 计数                 | 插件支持 Gemini `countTokens`，接受 `contents` 或 `generateContentRequest`，调用 AI Studio 的原生计数接口。                                                                              |
-| 自动续写                   | Playground 模型目录声明续写能力时，插件使用服务端续写令牌继续生成，并合并 JSON 或 SSE 和用量。每轮最多 32768 个输出 token，到达调用方的 `maxOutputTokens` 后结束。Build 路径不模拟续写。 |
+| 功能                       | 接口和行为                                                                                                                                                                        |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 对话生成                   | `generateContent`、`streamGenerateContent`，支持系统指令、思考配置和签名回传。流中断会报错，不补造成功的完成帧。                                                                  |
+| 函数调用                   | 支持 `AUTO` 和 `NONE`。`NONE` 移除用户函数声明。插件把参数模式转换为 Playground 格式，并在工具说明中附上完整模式。`ANY`、`VALIDATED` 和非空的 `allowedFunctionNames` 会返回 400。 |
+| 结构化输出                 | 支持可转换为 Playground 格式的 `responseSchema` 和 `responseJsonSchema`，例如对象、数组、枚举和数值范围。`$ref`、`$defs` 和 `additionalProperties` 不在响应模式的支持范围内。     |
+| 图片、音频、视频、PDF 输入 | 可按模型支持的类型传入 `inlineData`。`fileData` 接受外部 HTTP(S) 地址，文件访问权限由调用方负责。                                                                                 |
+| 图片生成                   | 使用账号可用的图片模型，可通过 `responseModalities` 和 `imageConfig` 配置，图片以 `inlineData` 返回。                                                                             |
+| 内置工具                   | 支持 `codeExecution` 和 `googleSearch`，可用性取决于模型。                                                                                                                        |
+| Token 计数                 | 插件支持 Gemini `countTokens`，接受 `contents` 或 `generateContentRequest`，调用 AI Studio 的原生计数接口。                                                                       |
+| 自动续写                   | Playground 模型目录声明续写能力时，插件使用服务端续写令牌继续生成，并合并 JSON 或 SSE 和用量。每轮最多 32768 个输出 token，到达调用方的 `maxOutputTokens` 后结束。                |
 
 插件保留 Google 的原生 `promptFeedback` 拦截说明，包括搜索可能返回的 `PROHIBITED_CONTENT`。响应既无候选答案，也无明确拦截原因时，插件会报错。
 
@@ -203,32 +194,13 @@ AI Studio 会拒绝 Bun 默认无头 Chrome 的部分浏览器标记，即使账
       ]
     }
   ],
-  "toolConfig": { "functionCallingConfig": { "mode": "ANY", "allowedFunctionNames": ["lookup"] } }
+  "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } }
 }
 ```
 
-Magpie 的 embeddings 请求正文示例：
+需要 embedding 时，可以在 Magpie 中单独添加 **Google Gemini** 提供商，使用 [AI Studio API Key](https://aistudio.google.com/api-keys) 和该项目可用的模型。语音生成可以直接使用 [Gemini Developer API](https://ai.google.dev/gemini-api/docs/speech-generation)。
 
-```json
-{
-  "model": "google-ai-studio/gemini-embedding-001",
-  "input": ["第一段文本", "第二段文本"],
-  "dimensions": 128,
-  "encoding_format": "float"
-}
-```
-
-### 尚不能完整提供的接口
-
-插件尚未提供以下接口。探测结果不能证明 Google 完全不支持它们。
-
-| 接口          | 已观察到的结果和剩余限制                                                                                                                                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Files / Drive | 当前账号通过 Build 列举 Files 返回 403，获取 Drive 访问令牌返回 401。当前 Magpie 也没有将 Files 上传请求交给该插件的入口，媒体可先使用 `inlineData`。                                                                     |
-| 显式缓存      | 当前账号列举缓存返回 403，创建缓存返回 404，未取得可用的缓存资源。普通对话不受影响。                                                                                                                                      |
-| Live          | 已取得网页 WebChannel 握手响应，但尚未验证完整实时生成。当前 Magpie 的 provider 插件没有双向 WebSocket 转发入口。                                                                                                         |
-| Veo           | 私有生成接口曾返回 operation，但查询结果返回 `401 unauthorized_client`，未能取得视频。当前 Magpie 的通用视频路由也不调用这类账号插件。                                                                                    |
-| Interactions  | 私有 `CreateInteractionStream` 已返回文本 `OK`，说明网页接口可用。Build 的公开格式路径返回 404，当前 Magpie 没有对应接口和事件转换契约，插件尚未实现这条独立协议。仅支持 Interactions 的模型不列入 GenerateContent 目录。 |
+插件不提供剩余额度、显式缓存、Live、Veo、Interactions 或 Files / Drive 接口。媒体输入可以使用 `inlineData`。
 
 AI Studio 私有接口会变化，网页的 DOM、动态请求头或 WAA 服务变化时，可能需要更新插件。Google 返回的权限、限流和服务错误会交给 Magpie 处理，插件不自动重试生成请求。
 
@@ -244,23 +216,11 @@ bun run check
 AISTUDIO_WEBVIEW_TEST=1 bun test test/webview.test.ts
 ```
 
-`bun run check` 运行代码检查、格式检查、markdownlint、类型检查和默认测试，GitHub CI 使用相同命令。Biome 负责 TypeScript 和 JSON，Prettier 负责 Markdown 和 YAML，两者不重复格式化同一类文件。
-
-代码沿用双引号、分号、两空格缩进和 110 列行宽。Biome 警告会导致检查失败，条件内赋值和非空断言允许使用。markdownlint 使用默认规则，仅关闭行长限制，保留中文段落和配置表格的原有换行。
-
-| 命令                             | 用途                                                              |
-| -------------------------------- | ----------------------------------------------------------------- |
-| `bun run lint`                   | 检查代码、格式、import 顺序和 Markdown，不修改文件。              |
-| `bun run lint:markdown`          | 单独运行 markdownlint。                                           |
-| `bun run lint:fix`               | 整理 import、应用安全的代码修复及 Markdown 修复，然后格式化文件。 |
-| `bun run format`                 | 格式化 TypeScript、JSON、Markdown 和 YAML。                       |
-| `bun run typecheck` / `bun test` | 单独运行类型检查或默认测试。                                      |
-
-EditorConfig 统一 UTF-8、LF 换行和文件末尾换行，Markdown 保留尾随空格。VS Code 推荐 Biome、Prettier 和 markdownlint 扩展，并按文件类型配置保存时格式化与修复。所有检查工具都遵循 `.gitignore`，不处理会话文件或 `.amp/` 中的产物。
+`bun run check` 运行 lint、格式检查、类型检查和默认测试。可用 `bun run lint:fix` 应用格式化和安全修复。
 
 本地开发时，可通过 `magpie plugin add /absolute/path/to/magpie-google-ai-studio` 安装工作目录。
 
-默认测试不启动浏览器。最后一条命令使用 Chromium 和本地模拟服务，验证传输、签名、流式读取、取消、会话迁移和代理配置。迁移测试需要 `openssl` 生成本地 HTTPS 证书，不需要 Google 账号。
+WebView 测试使用 Chromium 和本地模拟服务，验证传输、签名、取消、会话迁移和代理。测试需要 `openssl` 生成本地 HTTPS 证书。
 
 在能访问 Docker daemon 的 Linux 环境中，可验证官方镜像的依赖安装：
 

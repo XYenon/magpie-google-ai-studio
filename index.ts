@@ -1,7 +1,7 @@
 import { rm } from "node:fs/promises";
 import { StudioClient } from "./src/client.ts";
 import { prepareBrowser } from "./src/dependencies.ts";
-import { providerFetch, providerModels } from "./src/provider.ts";
+import { GEMINI_API, providerFetch, providerModels } from "./src/provider.ts";
 import {
   createSession,
   importSession,
@@ -21,6 +21,19 @@ function authSuccess(session: Session) {
     key: JSON.stringify(session),
     metadata: { email: session.accountId },
   };
+}
+
+function authFailure(error: unknown, fallback: string) {
+  return { type: "failed" as const, error: error instanceof Error ? error.message : fallback };
+}
+
+// An automatic OAuth flow lets Magpie validate a local session without opening an API-key prompt.
+function automaticAuth(
+  result: Promise<ReturnType<typeof authSuccess> | ReturnType<typeof authFailure>>,
+  instructions: string,
+  url = "",
+) {
+  return { url, opened: true, instructions, method: "auto" as const, callback: () => result };
 }
 
 export default {
@@ -53,7 +66,7 @@ export default {
         config.provider[ID] = {
           name: "Google AI Studio",
           npm: "@ai-sdk/google",
-          api: "https://generativelanguage.googleapis.com/v1beta",
+          api: GEMINI_API,
           models: {},
           ...(config.provider[ID] as Record<string, unknown> | undefined),
         };
@@ -89,22 +102,16 @@ export default {
                   if (inputs.exportPath?.trim()) await client.export(inputs.exportPath.trim());
                   return authSuccess(session);
                 } catch (error) {
-                  return {
-                    type: "failed" as const,
-                    error: error instanceof Error ? error.message : "登录失败",
-                  };
+                  return authFailure(error, "登录失败");
                 } finally {
                   await client.close();
                 }
               })();
-              return {
-                url: "https://aistudio.google.com/",
-                opened: true,
-                instructions:
-                  "请在打开的普通 Chrome 窗口登录 Google AI Studio，完成首次使用设置后关闭该窗口。最多等待 10 分钟，关闭后自动验证并保存会话。",
-                method: "auto" as const,
-                callback: () => result,
-              };
+              return automaticAuth(
+                result,
+                "请在打开的普通 Chrome 窗口登录 Google AI Studio，完成首次使用设置后关闭该窗口。最多等待 10 分钟，关闭后自动验证并保存会话。",
+                "https://aistudio.google.com/",
+              );
             },
           },
           {
@@ -139,21 +146,13 @@ export default {
                   if (inputs.exportPath?.trim()) await client.export(inputs.exportPath.trim());
                   return authSuccess(session);
                 } catch (error) {
-                  return {
-                    type: "failed" as const,
-                    error: error instanceof Error ? error.message : "导入失败",
-                  };
+                  return authFailure(error, "导入失败");
                 }
               })();
-              // The automatic flow avoids Magpie's API-key prompt, which is
-              // always shown for API methods even when authorize reads a file.
-              return {
-                url: "",
-                opened: true,
-                instructions: "正在验证会话；如果填写了导出路径，验证后会将可迁移会话包保存到该路径。",
-                method: "auto" as const,
-                callback: () => result,
-              };
+              return automaticAuth(
+                result,
+                "正在验证会话；如果填写了导出路径，验证后会将可迁移会话包保存到该路径。",
+              );
             },
           },
           {
@@ -203,32 +202,21 @@ export default {
             async authorize(inputs: Record<string, string> = {}) {
               const result = (async () => {
                 let session: Session | undefined;
-                let client: StudioClient | undefined;
                 try {
                   session = await importSessionText(inputs.payload || "");
-                  client = clientFor(session);
-                  await client.models();
+                  await clientFor(session).models();
                   return authSuccess(session);
                 } catch (error) {
                   // A failed import must not leave an exportable local account.
                   if (session) {
-                    await client?.close();
+                    await clients.get(session.profile)?.close();
                     clients.delete(session.profile);
                     await rm(session.profile, { recursive: true, force: true });
                   }
-                  return {
-                    type: "failed" as const,
-                    error: error instanceof Error ? error.message : "导入失败",
-                  };
+                  return authFailure(error, "导入失败");
                 }
               })();
-              return {
-                url: "",
-                opened: true,
-                instructions: "正在恢复并验证会话，成功后会自动保存账号并读取模型列表。",
-                method: "auto" as const,
-                callback: () => result,
-              };
+              return automaticAuth(result, "正在恢复并验证会话，成功后会自动保存账号并读取模型列表。");
             },
           },
         ],
