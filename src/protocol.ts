@@ -462,6 +462,7 @@ export function encodeGenerateRequest(
   timezone?: string,
   continuationRound = 0,
   continuationToken?: string,
+  magpieEffort?: string,
 ): EncodedRequest {
   keys(
     request,
@@ -554,9 +555,18 @@ export function encodeGenerateRequest(
     if (t.thinkingBudget !== undefined && t.thinkingLevel !== undefined)
       fail("thinkingBudget and thinkingLevel are mutually exclusive");
     const thinking: Wire = [t.includeThoughts === undefined ? 1 : boolean(t.includeThoughts) ? 1 : 0];
-    if (t.thinkingBudget !== undefined)
-      set(thinking, 1, number(t.thinkingBudget, "thinkingBudget", -1, Infinity, true));
-    else if (t.thinkingLevel !== undefined)
+    if (t.thinkingBudget !== undefined) {
+      const budget = number(t.thinkingBudget, "thinkingBudget", -1, Infinity, true);
+      const levels = caps.includes(52) && defaults[71] != null ? array(defaults[71])[6] : undefined;
+      const effort = magpieEffort?.toUpperCase();
+      const level =
+        effort && Object.hasOwn(thinkingLevels, effort)
+          ? thinkingLevels[effort as keyof typeof thinkingLevels]
+          : 0;
+      // Magpie's translated body can lose the selected effort when it encodes a budget.
+      if (level && Array.isArray(levels) && levels.includes(level)) set(thinking, 3, level);
+      else set(thinking, 1, budget);
+    } else if (t.thinkingLevel !== undefined)
       set(
         thinking,
         3,

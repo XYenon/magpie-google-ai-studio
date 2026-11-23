@@ -231,12 +231,16 @@ test("Playground preserves temperature boundaries and gives explicit thinking se
   const defaults: Wire = Array(72).fill(null);
   defaults[64] = [52];
   defaults[71] = [null, null, null, null, null, 2, [4, 2]];
-  for (const [temperature, thinkingConfig, expected] of [
+  for (const [temperature, thinkingConfig, expected, effort] of [
     [0, { thinkingBudget: 0 }, [1, 0]],
     [2, { thinkingBudget: -1 }, [1, -1]],
     [1, { thinkingBudget: 10_000 }, [1, 10_000]],
     [1, { thinkingLevel: "minimal" }, [1, null, null, 4]],
     [1, undefined, [1, null, null, 2]],
+    [1, { thinkingBudget: 10_000, includeThoughts: false }, [0, null, null, 4], "minimal"],
+    [1, { thinkingBudget: 10_000 }, [1, null, null, 2], "medium"],
+    [1, { thinkingBudget: 10_000 }, [1, 10_000], "high"],
+    [1, { thinkingLevel: "medium" }, [1, null, null, 2], "minimal"],
   ] as const) {
     const fetch = providerFetch({
       ...transport,
@@ -249,6 +253,7 @@ test("Playground preserves temperature boundaries and gives explicit thinking se
     });
     const response = await fetch(`${base}generateContent`, {
       method: "POST",
+      headers: effort ? { "X-Magpie-Effort": effort } : undefined,
       body: JSON.stringify({
         ...request,
         generationConfig: { temperature, thinkingConfig },

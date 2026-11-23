@@ -44,6 +44,29 @@ function fakeSession(profile: string): Session {
   return { version: 1, accountId: "test@example.com", profile };
 }
 
+test.skipIf(!unix)("open waits for a same-host Chrome owner to exit", async () => {
+  const profile = await mkdtemp(join(tmpdir(), "studio-browser-handoff-"));
+  const chrome = join(profile, "fake-chrome.sh");
+  const owner = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 30_000)"]);
+  const browser = new StudioBrowser(fakeSession(profile), { chromePath: chrome });
+  let exitOwner: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await symlink(`${hostname()}-${owner.pid}`, join(profile, "SingletonLock"));
+    await writeFile(chrome, "#!/bin/sh\nexit 42\n");
+    await chmod(chrome, 0o755);
+    exitOwner = setTimeout(() => owner.kill(), 250);
+    await expect(browser.open()).rejects.toThrow(
+      "Chrome exited before starting WebView (exit 42, signal none)",
+    );
+  } finally {
+    clearTimeout(exitOwner);
+    owner.kill();
+    await owner.exited;
+    await browser.close();
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
 test.skipIf(!unix)(
   "open rejects without removing DevToolsActivePort when SingletonLock has a live owner",
   async () => {

@@ -80,10 +80,15 @@ export class StudioBrowser {
     await access(this.session.profile);
     // Another host or browser instance may still own this profile. Leave its
     // discovery endpoint intact instead of deleting it and spawning a second Chrome.
-    const lockOwner = await liveLockOwner(
-      this.session.profile,
-      process.platform === "linux" && this.options.recoverForeignProfileLock === true,
-    );
+    const recoverForeignLock =
+      process.platform === "linux" && this.options.recoverForeignProfileLock === true;
+    const deadline = performance.now() + 3000;
+    let lockOwner = await liveLockOwner(this.session.profile, recoverForeignLock);
+    // A replacement plugin host can start while the old Chrome is still shutting down.
+    while (lockOwner?.match(/^(.+)-\d+$/)?.[1] === hostname() && performance.now() < deadline) {
+      await Bun.sleep(100);
+      lockOwner = await liveLockOwner(this.session.profile, recoverForeignLock);
+    }
     if (lockOwner) throw new Error(`Chrome profile is in use by ${lockOwner}; close that browser and retry`);
     const path = chromePath(this.options.chromePath);
     const configuredArgs = this.options.chromeArgs || [];

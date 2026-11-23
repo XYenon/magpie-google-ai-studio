@@ -74,6 +74,7 @@ export function providerFetch(
     }
     const cancellation = new AbortController();
     const signal = AbortSignal.any([request.signal, cancellation.signal]);
+    const effort = request.headers.get("X-Magpie-Effort") ?? undefined;
     let validationError: unknown;
     try {
       let continuationLimit: number | undefined;
@@ -81,7 +82,7 @@ export function providerFetch(
         model,
         (defaults, timezone) => {
           try {
-            const encoded = encodeGenerateRequest(model, body, defaults, timezone);
+            const encoded = encodeGenerateRequest(model, body, defaults, timezone, 0, undefined, effort);
             continuationLimit = encoded.continuationLimit;
             return encoded;
           } catch (error) {
@@ -104,7 +105,7 @@ export function providerFetch(
                 transport.generate(
                   model,
                   (defaults, timezone) =>
-                    encodeGenerateRequest(model, body, defaults, timezone, round, token),
+                    encodeGenerateRequest(model, body, defaults, timezone, round, token, effort),
                   signal,
                 ),
             }
