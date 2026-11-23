@@ -127,6 +127,8 @@ magpie plugin options magpie-google-ai-studio '{"chromePath":"/usr/bin/chromium"
 | `bootstrapModel` | 字符串         | 账号目录中首个可用的 GenerateContent 模型                    | 初始化页面和 WAA 时使用的模型，不改变实际生成请求指定的模型。必须来自当前账号的 GenerateContent 目录，仅允许字母、数字、下划线、点和连字符，不带 `models/` 前缀；不可用时会报错。                                                                           |
 | `timeoutMs`      | 数字，单位毫秒 | 浏览器进程通信和生成请求为 `180000`；页面内部请求为 `120000` | 覆盖上述可配置的超时，必须是有限数值且不小于 `1000`。生成请求的超时按无数据间隔计算，收到响应头或非空数据块后重新计时。不代表整个启动或登录过程的总时限；部分页面初始化等待使用固定超时，交互式登录最多等待 10 分钟。                                       |
 
+如果 Docker 自动更新会更换容器主机名，可以在插件选项中设置 `"recoverForeignProfileLock": true`。仅在每个浏览器 profile 由一个容器独占，且更新流程会先停止旧容器时启用。启用后，插件在 Linux 上启动浏览器时会移除记录了其他主机名的 Chrome `SingletonLock`。此选项默认为 `false`。
+
 ### 环境变量
 
 环境变量应设置在 Magpie 进程或 Docker 容器中，不写入选项 JSON。

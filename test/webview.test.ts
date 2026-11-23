@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -453,7 +453,13 @@ test.skipIf(!enabled)(
       clients.push(manual);
       expect((await manual.models()).fixture.name).toBe("proxy-a");
       await manual.close();
-      const restarted = clientFor(destination);
+      if (process.platform === "linux") {
+        await symlink("previous-container-181", join(destination.profile, "SingletonLock"));
+        await symlink(join(root, "missing", "SingletonSocket"), join(destination.profile, "SingletonSocket"));
+        await symlink("123456789", join(destination.profile, "SingletonCookie"));
+      }
+      const restarted = new StudioClient(destination, { ...options, recoverForeignProfileLock: true });
+      clients.push(restarted);
       const count = await providerFetch(restarted)(
         "https://generativelanguage.googleapis.com/v1beta/models/fixture:countTokens",
         { method: "POST", body: JSON.stringify({ contents: [{ parts: [{ text: "Count this" }] }] }) },

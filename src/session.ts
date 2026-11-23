@@ -43,6 +43,7 @@ export interface Options {
   chromeArgs?: string[];
   bootstrapModel?: string;
   timeoutMs?: number;
+  recoverForeignProfileLock?: boolean;
 }
 
 export function optionsFrom(raw: Record<string, unknown> = {}): Options {
@@ -71,6 +72,11 @@ export function optionsFrom(raw: Record<string, unknown> = {}): Options {
       throw new Error("timeoutMs must be at least 1000");
     }
     result.timeoutMs = raw.timeoutMs;
+  }
+  if (raw.recoverForeignProfileLock !== undefined) {
+    if (typeof raw.recoverForeignProfileLock !== "boolean")
+      throw new Error("recoverForeignProfileLock must be a boolean");
+    result.recoverForeignProfileLock = raw.recoverForeignProfileLock;
   }
   return result;
 }

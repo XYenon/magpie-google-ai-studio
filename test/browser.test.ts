@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { StudioBrowser } from "../src/browser.ts";
-import type { Session } from "../src/session.ts";
+import { optionsFrom, type Session } from "../src/session.ts";
 
 // A Chrome stand-in that advertises an unreachable DevTools endpoint, so
 // WebView fails after startup and open() must close the spawned process.
@@ -52,11 +52,15 @@ test.skipIf(!unix)(
     try {
       await symlink(`${hostname()}-${process.pid}`, join(profile, "SingletonLock"));
       await writeFile(portFile, "9222\n/devtools/browser/live\n");
-      const browser = new StudioBrowser(fakeSession(profile), { chromePath: "/nonexistent/chrome" });
+      const browser = new StudioBrowser(fakeSession(profile), {
+        chromePath: "/nonexistent/chrome",
+        recoverForeignProfileLock: true,
+      });
       await expect(browser.open()).rejects.toThrow(
         `Chrome profile is in use by ${hostname()}-${process.pid}; close that browser and retry`,
       );
       expect(await readFile(portFile, "utf8")).toBe("9222\n/devtools/browser/live\n");
+      expect(await readlink(join(profile, "SingletonLock"))).toBe(`${hostname()}-${process.pid}`);
     } finally {
       await rm(profile, { recursive: true, force: true });
     }
@@ -74,7 +78,33 @@ test.skipIf(!unix)(
       const browser = new StudioBrowser(fakeSession(profile), { chromePath: "/nonexistent/chrome" });
       await expect(browser.open()).rejects.toThrow("Chrome profile is in use by another-host-12345");
       expect(await readFile(portFile, "utf8")).toBe("9222\n/devtools/browser/remote\n");
+      expect(await readlink(join(profile, "SingletonLock"))).toBe("another-host-12345");
     } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "exclusive deployment can start Chrome after a previous container leaves a foreign lock",
+  async () => {
+    const profile = await mkdtemp(join(tmpdir(), "studio-browser-container-lock-"));
+    const lock = join(profile, "SingletonLock");
+    const chrome = join(profile, "fake-chrome.sh");
+    const browser = new StudioBrowser(
+      fakeSession(profile),
+      optionsFrom({ chromePath: chrome, recoverForeignProfileLock: true }),
+    );
+    try {
+      await symlink("previous-container-181", lock);
+      await writeFile(chrome, `#!/bin/sh\nif [ -L "\${1#*=}/SingletonLock" ]; then exit 1; fi\nexit 42\n`);
+      await chmod(chrome, 0o755);
+      await expect(browser.open()).rejects.toThrow(
+        "Chrome exited before starting WebView (exit 42, signal none)",
+      );
+      await expect(readlink(lock)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await browser.close();
       await rm(profile, { recursive: true, force: true });
     }
   },
